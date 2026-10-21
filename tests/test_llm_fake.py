@@ -18,6 +18,13 @@ async def test_reply_keyed_by_prompt() -> None:
     assert response.cost_usd == 0.0
 
 
+async def test_prompt_id_is_copied_to_response() -> None:
+    llm = FakeLLM(by_prompt={"hello": "hi there"})
+    assert (await llm.generate(_request("hello"))).prompt_id is None
+    request = _request("hello").model_copy(update={"prompt_id": "greet.v1"})
+    assert (await llm.generate(request)).prompt_id == "greet.v1"
+
+
 async def test_reply_matched_by_function() -> None:
     llm = FakeLLM(rules=[(lambda r: r.tier == ModelTier.STRONG, "strong answer")])
     response = await llm.generate(_request("anything", tier=ModelTier.STRONG))

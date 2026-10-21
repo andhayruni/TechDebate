@@ -13,5 +13,9 @@ class LLMError(TechDebateError):
     """The model provider call failed."""
 
 
+class PromptError(TechDebateError):
+    """A prompt file is unknown, invalid or missing a variable."""
+
+
 class BudgetExceeded(TechDebateError):
     """A spending cap was reached."""
