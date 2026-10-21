@@ -93,6 +93,20 @@ async def test_structured_output_is_parsed() -> None:
     assert response.parsed == decision
 
 
+async def test_prompt_id_is_copied_but_not_sent() -> None:
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return httpx2.Response(200, json=_message("hello"))
+
+    request = _request().model_copy(update={"prompt_id": "greet.v1"})
+    response = await _llm(handler).generate(request)
+
+    assert response.prompt_id == "greet.v1"
+    assert "prompt_id" not in sent[0]
+
+
 async def test_output_not_matching_schema_raises() -> None:
     llm = _llm(_reply(_message('{"join": "maybe"}')))
     with pytest.raises(LLMError, match="RelevanceDecision"):

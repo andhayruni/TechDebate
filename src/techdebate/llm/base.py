@@ -22,6 +22,7 @@ class LLMRequest(BaseModel):
     messages: list[Message]
     output_schema: type[BaseModel] | None = None
     max_tokens: int
+    prompt_id: str | None = None  # e.g. "analyst.v1"; metadata only, never sent to the provider
 
 
 class Usage(BaseModel):
@@ -35,6 +36,7 @@ class LLMResponse(BaseModel):
     usage: Usage
     cost_usd: float
     model: str
+    prompt_id: str | None = None  # copied from the request
 
 
 class LLMClient(Protocol):

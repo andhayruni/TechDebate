@@ -61,9 +61,9 @@ class AnthropicLLM:
         except anthropic.APIError as e:
             raise _to_llm_error(e, model) from e
 
-        return self._response(message, model, request.output_schema)
+        return self._response(message, model, request)
 
-    def _response(self, message: AnthropicMessage, requested_model: str, schema: type[BaseModel] | None) -> LLMResponse:
+    def _response(self, message: AnthropicMessage, requested_model: str, request: LLMRequest) -> LLMResponse:
         # Priced by the model we asked for, reported as the one that answered.
         model = message.model
         if message.stop_reason == "refusal":
@@ -72,6 +72,7 @@ class AnthropicLLM:
 
         text = "".join(block.text for block in message.content if block.type == "text")
         parsed: BaseModel | None = None
+        schema = request.output_schema
         if schema is not None:
             if message.stop_reason == "max_tokens":
                 raise LLMError(f"{model} hit max_tokens before finishing the {schema.__name__} output")
@@ -84,7 +85,9 @@ class AnthropicLLM:
 
         usage = Usage(input_tokens=message.usage.input_tokens, output_tokens=message.usage.output_tokens)
         cost = cost_usd(usage, self._prices[requested_model])
-        return LLMResponse(text=text, parsed=parsed, usage=usage, cost_usd=cost, model=model)
+        return LLMResponse(
+            text=text, parsed=parsed, usage=usage, cost_usd=cost, model=model, prompt_id=request.prompt_id
+        )
 
 
 def _to_llm_error(e: anthropic.APIError, model: str) -> LLMError:
