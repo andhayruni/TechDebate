@@ -1,0 +1,106 @@
+"""LLMClient backed by the Anthropic Messages API."""
+
+import logging
+
+import anthropic
+from anthropic import AsyncAnthropic
+from anthropic.types import Message as AnthropicMessage
+from anthropic.types import MessageParam, OutputConfigParam
+from pydantic import BaseModel, ValidationError
+
+from techdebate.config import Effort, ModelPrice, Settings
+from techdebate.errors import LLMError
+from techdebate.llm.base import LLMRequest, LLMResponse, ModelTier, Usage
+
+log = logging.getLogger(__name__)
+
+
+def cost_usd(usage: Usage, price: ModelPrice) -> float:
+    return (usage.input_tokens * price.input_per_mtok + usage.output_tokens * price.output_per_mtok) / 1_000_000
+
+
+class AnthropicLLM:
+    def __init__(self, settings: Settings, client: AsyncAnthropic | None = None) -> None:
+        self._models: dict[ModelTier, tuple[str, Effort]] = {
+            ModelTier.CHEAP: (settings.cheap_model, settings.cheap_effort),
+            ModelTier.STRONG: (settings.strong_model, settings.strong_effort),
+        }
+        missing = sorted({m for m, _ in self._models.values() if m not in settings.model_prices})
+        if missing:
+            raise LLMError(f"no price configured for model(s): {', '.join(missing)}")
+        self._prices = settings.model_prices
+
+        if client is None:
+            key = settings.anthropic_api_key
+            # With no key, the SDK resolves credentials itself (ANTHROPIC_AUTH_TOKEN, an `ant` profile, ...).
+            client = AsyncAnthropic(
+                api_key=key.get_secret_value() if key else None,
+                timeout=settings.llm_timeout_s,
+                max_retries=settings.llm_max_retries,
+            )
+        self._client = client
+
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        model, effort = self._models[request.tier]
+        output_config: OutputConfigParam = {"effort": effort}
+        if request.output_schema is not None:
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": anthropic.transform_schema(request.output_schema),
+            }
+        messages: list[MessageParam] = [{"role": m.role, "content": m.content} for m in request.messages]
+
+        try:
+            message = await self._client.messages.create(
+                model=model,
+                max_tokens=request.max_tokens,
+                system=request.system,
+                messages=messages,
+                output_config=output_config,
+            )
+        except anthropic.APIError as e:
+            raise _to_llm_error(e, model) from e
+
+        return self._response(message, model, request.output_schema)
+
+    def _response(self, message: AnthropicMessage, requested_model: str, schema: type[BaseModel] | None) -> LLMResponse:
+        # Priced by the model we asked for, reported as the one that answered.
+        model = message.model
+        if message.stop_reason == "refusal":
+            category = message.stop_details.category if message.stop_details else None
+            raise LLMError(f"{model} refused the request (category: {category or 'unspecified'})")
+
+        text = "".join(block.text for block in message.content if block.type == "text")
+        parsed: BaseModel | None = None
+        if schema is not None:
+            if message.stop_reason == "max_tokens":
+                raise LLMError(f"{model} hit max_tokens before finishing the {schema.__name__} output")
+            try:
+                parsed = schema.model_validate_json(text)
+            except ValidationError as e:
+                raise LLMError(f"{model} returned output that does not match {schema.__name__}") from e
+        elif message.stop_reason == "max_tokens":
+            log.warning("llm output truncated model=%s max_tokens reached", model)
+
+        usage = Usage(input_tokens=message.usage.input_tokens, output_tokens=message.usage.output_tokens)
+        cost = cost_usd(usage, self._prices[requested_model])
+        return LLMResponse(text=text, parsed=parsed, usage=usage, cost_usd=cost, model=model)
+
+
+def _to_llm_error(e: anthropic.APIError, model: str) -> LLMError:
+    # Most specific first: retries have already run for rate limits, 5xx and connection errors.
+    if isinstance(e, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
+        return LLMError("Anthropic API key is missing or invalid (set ANTHROPIC_API_KEY)")
+    if isinstance(e, anthropic.NotFoundError):
+        return LLMError(f"unknown model: {model}")
+    if isinstance(e, anthropic.RateLimitError):
+        return LLMError("Anthropic rate limit reached, still failing after retries")
+    if isinstance(e, anthropic.APIStatusError):
+        if e.status_code >= 500:
+            return LLMError(f"Anthropic server error ({e.status_code}), still failing after retries")
+        return LLMError(f"Anthropic rejected the request ({e.status_code}): {e.message}")
+    if isinstance(e, anthropic.APITimeoutError):
+        return LLMError("Anthropic request timed out")
+    if isinstance(e, anthropic.APIConnectionError):
+        return LLMError("could not reach the Anthropic API")
+    return LLMError(f"Anthropic API error: {e}")

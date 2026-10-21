@@ -1,9 +1,28 @@
 """Runtime settings, read from the environment (TECHDEBATE_*) or a local .env file."""
 
 from functools import lru_cache
+from typing import Literal, TypeAlias
 
-from pydantic import Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+Effort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+class ModelPrice(BaseModel):
+    """USD per million tokens."""
+
+    input_per_mtok: float
+    output_per_mtok: float
+
+
+# Prices as of 2026-10.
+def _default_prices() -> dict[str, ModelPrice]:
+    return {
+        # Haiku's rate is for prompts up to 100K tokens ($0.50 / $2.50 beyond); our prompts stay well under.
+        "claude-haiku-5-5": ModelPrice(input_per_mtok=0.10, output_per_mtok=0.50),
+        "claude-sonnet-5-5": ModelPrice(input_per_mtok=2.00, output_per_mtok=10.00),
+    }
 
 
 class Settings(BaseSettings):
@@ -12,9 +31,17 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     github_token: SecretStr | None = Field(default=None, validation_alias="GITHUB_TOKEN")
 
-    # Cheap model decides whether an analyst joins; strong model writes the debate turns.
-    relevance_model: str = "claude-haiku-5-5"
-    debate_model: str = "claude-sonnet-5-5"
+    # Cheap tier: relevance checks and query planning. Strong tier: the debate turns.
+    cheap_model: str = "claude-haiku-5-5"
+    strong_model: str = "claude-sonnet-5-5"
+    # Both models think by default, and thinking counts against max_tokens; low effort keeps cheap calls short.
+    cheap_effort: Effort = "low"
+    strong_effort: Effort = "high"
+    model_prices: dict[str, ModelPrice] = Field(default_factory=_default_prices)
+
+    # The SDK retries rate limits, server and connection errors with backoff.
+    llm_timeout_s: float = 60.0
+    llm_max_retries: int = 3
 
     run_budget_usd: float = 0.50
     daily_budget_usd: float = 5.00
