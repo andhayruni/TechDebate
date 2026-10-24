@@ -9,5 +9,6 @@ gathers evidence from free public sources and cites it.
 uv sync
 cp .env.example .env   # add ANTHROPIC_API_KEY
 uv run ruff check . && uv run pyright && uv run pytest
+uv run techdebate ask "What is Rust?"   # smoke check: answer + cost
 uv run techdebate run "Artificial intelligence"
 ```
