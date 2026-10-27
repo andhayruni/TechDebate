@@ -47,7 +47,6 @@ class Settings(BaseSettings):
     daily_budget_usd: float = 5.00
 
     db_path: str = "techdebate.db"
-    rebuttal_rounds: int = 1
 
 
 @lru_cache

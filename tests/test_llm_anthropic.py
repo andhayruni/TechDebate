@@ -5,14 +5,20 @@ from typing import Any
 import httpx2
 import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
+from pydantic import BaseModel
 
 from techdebate.config import ModelPrice, Settings
 from techdebate.errors import LLMError
 from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, Message, ModelTier, Usage
 from techdebate.llm.anthropic_client import cost_usd
-from techdebate.models import RelevanceDecision
 
 Handler = Callable[[httpx2.Request], httpx2.Response]
+
+
+class Answer(BaseModel):
+    name: str
+    ok: bool
+    reason: str
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -48,7 +54,7 @@ def _error(status: int) -> Handler:
     return lambda _: httpx2.Response(status, json={"type": "error", "error": {"type": "error", "message": "boom"}})
 
 
-def _request(tier: ModelTier = ModelTier.CHEAP, schema: type[RelevanceDecision] | None = None) -> LLMRequest:
+def _request(tier: ModelTier = ModelTier.CHEAP, schema: type[Answer] | None = None) -> LLMRequest:
     return LLMRequest(
         tier=tier, system="sys", messages=[Message(role="user", content="Rust")], output_schema=schema, max_tokens=500
     )
@@ -78,19 +84,19 @@ async def test_text_generation_maps_tier_to_model_and_effort(tier: ModelTier, mo
 
 
 async def test_structured_output_is_parsed() -> None:
-    decision = RelevanceDecision(analyst="builder", join=True, reason="Widely used")
+    answer = Answer(name="builder", ok=True, reason="Widely used")
     sent: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         sent.append(json.loads(request.content))
-        return httpx2.Response(200, json=_message(decision.model_dump_json()))
+        return httpx2.Response(200, json=_message(answer.model_dump_json()))
 
-    response = await _llm(handler).generate(_request(schema=RelevanceDecision))
+    response = await _llm(handler).generate(_request(schema=Answer))
 
     output_format = sent[0]["output_config"]["format"]
     assert output_format["type"] == "json_schema"
-    assert output_format["schema"]["required"] == ["analyst", "join", "reason"]
-    assert response.parsed == decision
+    assert output_format["schema"]["required"] == ["name", "ok", "reason"]
+    assert response.parsed == answer
 
 
 async def test_prompt_id_is_copied_but_not_sent() -> None:
@@ -108,9 +114,9 @@ async def test_prompt_id_is_copied_but_not_sent() -> None:
 
 
 async def test_output_not_matching_schema_raises() -> None:
-    llm = _llm(_reply(_message('{"join": "maybe"}')))
-    with pytest.raises(LLMError, match="RelevanceDecision"):
-        await llm.generate(_request(schema=RelevanceDecision))
+    llm = _llm(_reply(_message('{"ok": "maybe"}')))
+    with pytest.raises(LLMError, match="Answer"):
+        await llm.generate(_request(schema=Answer))
 
 
 async def test_refusal_raises() -> None:
@@ -120,9 +126,9 @@ async def test_refusal_raises() -> None:
 
 
 async def test_truncated_structured_output_raises() -> None:
-    llm = _llm(_reply(_message('{"analyst": "buil', stop_reason="max_tokens")))
+    llm = _llm(_reply(_message('{"name": "buil', stop_reason="max_tokens")))
     with pytest.raises(LLMError, match="max_tokens"):
-        await llm.generate(_request(schema=RelevanceDecision))
+        await llm.generate(_request(schema=Answer))
 
 
 async def test_truncated_text_is_returned() -> None:
