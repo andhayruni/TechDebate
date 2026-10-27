@@ -1,8 +1,14 @@
 import pytest
+from pydantic import BaseModel
 
 from techdebate.errors import LLMError
 from techdebate.llm import FakeLLM, LLMClient, LLMRequest, Message, ModelTier
-from techdebate.models import RelevanceDecision
+
+
+class Answer(BaseModel):
+    name: str
+    ok: bool
+    reason: str
 
 
 def _request(prompt: str, tier: ModelTier = ModelTier.CHEAP) -> LLMRequest:
@@ -32,11 +38,11 @@ async def test_reply_matched_by_function() -> None:
 
 
 async def test_model_reply_sets_parsed_and_text() -> None:
-    decision = RelevanceDecision(analyst="builder", join=True, reason="Widely used")
-    llm = FakeLLM(rules=[(lambda _: True, decision)])
-    response = await llm.generate(_request("Rust").model_copy(update={"output_schema": RelevanceDecision}))
-    assert response.parsed == decision
-    assert RelevanceDecision.model_validate_json(response.text) == decision
+    answer = Answer(name="builder", ok=True, reason="Widely used")
+    llm = FakeLLM(rules=[(lambda _: True, answer)])
+    response = await llm.generate(_request("Rust").model_copy(update={"output_schema": Answer}))
+    assert response.parsed == answer
+    assert Answer.model_validate_json(response.text) == answer
 
 
 async def test_calls_are_recorded_in_order() -> None:
