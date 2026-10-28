@@ -1,6 +1,7 @@
 """Runtime settings, read from the environment (TECHDEBATE_*) or a local .env file."""
 
 from functools import lru_cache
+from importlib.metadata import version
 from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, Field, SecretStr
@@ -25,6 +26,10 @@ def _default_prices() -> dict[str, ModelPrice]:
     }
 
 
+def _default_user_agent() -> str:
+    return f"techdebate/{version('techdebate')} (+https://github.com/andhayruni/TechDebate)"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TECHDEBATE_", env_file=".env", extra="ignore")
 
@@ -42,6 +47,10 @@ class Settings(BaseSettings):
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0
     llm_max_retries: int = 3
+
+    # Evidence tools share one HTTP client. Public APIs (Wikimedia, GitHub) ask for a descriptive user agent.
+    http_timeout_s: float = 20.0
+    http_user_agent: str = Field(default_factory=_default_user_agent)
 
     run_budget_usd: float = 0.50
     daily_budget_usd: float = 5.00
