@@ -1,11 +1,11 @@
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import httpx2
 import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from techdebate.config import ModelPrice, Settings
 from techdebate.errors import LLMError
@@ -54,7 +54,7 @@ def _error(status: int) -> Handler:
     return lambda _: httpx2.Response(status, json={"type": "error", "error": {"type": "error", "message": "boom"}})
 
 
-def _request(tier: ModelTier = ModelTier.CHEAP, schema: type[Answer] | None = None) -> LLMRequest:
+def _request(tier: ModelTier = ModelTier.CHEAP, schema: type[BaseModel] | None = None) -> LLMRequest:
     return LLMRequest(
         tier=tier, system="sys", messages=[Message(role="user", content="Rust")], output_schema=schema, max_tokens=500
     )
@@ -117,6 +117,42 @@ async def test_output_not_matching_schema_raises() -> None:
     llm = _llm(_reply(_message('{"ok": "maybe"}')))
     with pytest.raises(LLMError, match="Answer"):
         await llm.generate(_request(schema=Answer))
+
+
+def _pick(reply_to: Any) -> type[BaseModel]:
+    # A schema built per call, with reply_to limited to the values valid at that moment.
+    return create_model("Pick", reply_to=(reply_to, ...), reason=(str, ...))
+
+
+@pytest.mark.parametrize(
+    ("reply_to", "sent_schema", "value"),
+    [
+        (Literal[1, 2, 3] | None, {"anyOf": [{"type": "integer", "enum": [1, 2, 3]}, {"type": "null"}]}, 2),
+        # A one-value Literal stays strict: an enum, not a const moved into the description.
+        (Literal[1] | None, {"anyOf": [{"type": "integer", "enum": [1]}, {"type": "null"}]}, 1),
+        (None, {"type": "null"}, None),
+    ],
+)
+async def test_per_call_literal_schema(reply_to: Any, sent_schema: dict[str, Any], value: int | None) -> None:
+    schema = _pick(reply_to)
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return httpx2.Response(200, json=_message(json.dumps({"reply_to": value, "reason": "r"})))
+
+    response = await _llm(handler).generate(_request(schema=schema))
+
+    sent_reply_to = sent[0]["output_config"]["format"]["schema"]["properties"]["reply_to"]
+    assert {k: v for k, v in sent_reply_to.items() if k != "title"} == sent_schema
+    assert isinstance(response.parsed, schema)
+    assert response.parsed.model_dump() == {"reply_to": value, "reason": "r"}
+
+
+async def test_per_call_literal_out_of_range_raises() -> None:
+    llm = _llm(_reply(_message('{"reply_to": 4, "reason": "r"}')))
+    with pytest.raises(LLMError, match="Pick"):
+        await llm.generate(_request(schema=_pick(Literal[1] | None)))
 
 
 async def test_refusal_raises() -> None:
