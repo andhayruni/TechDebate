@@ -1,6 +1,7 @@
 """LLMClient backed by the Anthropic Messages API."""
 
 import logging
+from typing import Any, cast
 
 import anthropic
 from anthropic import AsyncAnthropic
@@ -46,7 +47,7 @@ class AnthropicLLM:
         if request.output_schema is not None:
             output_config["format"] = {
                 "type": "json_schema",
-                "schema": anthropic.transform_schema(request.output_schema),
+                "schema": anthropic.transform_schema(_const_to_enum(request.output_schema.model_json_schema())),
             }
         messages: list[MessageParam] = [{"role": m.role, "content": m.content} for m in request.messages]
 
@@ -88,6 +89,19 @@ class AnthropicLLM:
         return LLMResponse(
             text=text, parsed=parsed, usage=usage, cost_usd=cost, model=model, prompt_id=request.prompt_id
         )
+
+
+def _const_to_enum(node: Any) -> Any:
+    # Pydantic writes a one-value Literal as "const", which transform_schema moves into the description,
+    # leaving the field unconstrained. A one-value "enum" is kept.
+    if isinstance(node, dict):
+        node = {key: _const_to_enum(value) for key, value in cast("dict[str, Any]", node).items()}
+        if "const" in node and not isinstance(node["const"], dict):
+            node["enum"] = [node.pop("const")]
+        return node
+    if isinstance(node, list):
+        return [_const_to_enum(item) for item in cast("list[Any]", node)]
+    return node
 
 
 def _to_llm_error(e: anthropic.APIError, model: str) -> LLMError:

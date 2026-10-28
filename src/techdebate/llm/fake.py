@@ -3,7 +3,7 @@
 from collections.abc import Callable, Mapping, Sequence
 from typing import TypeAlias
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from techdebate.errors import LLMError
 from techdebate.llm.base import LLMRequest, LLMResponse, Usage
@@ -17,7 +17,11 @@ def _last_user_message(request: LLMRequest) -> str:
 
 
 class FakeLLM:
-    """Replies keyed by the last user message are tried first, then predicate rules in order."""
+    """Replies keyed by the last user message are tried first, then predicate rules in order.
+
+    Like AnthropicLLM, a reply is validated into the request's output_schema (a model reply through its JSON),
+    and parsed is set only when the request has a schema.
+    """
 
     def __init__(
         self,
@@ -31,9 +35,15 @@ class FakeLLM:
     async def generate(self, request: LLMRequest) -> LLMResponse:
         self.calls.append(request)
         reply = self._find_reply(request)
-        if isinstance(reply, BaseModel):
-            return self._response(request, text=reply.model_dump_json(), parsed=reply)
-        return self._response(request, text=reply)
+        text = reply.model_dump_json() if isinstance(reply, BaseModel) else reply
+        parsed: BaseModel | None = None
+        schema = request.output_schema
+        if schema is not None:
+            try:
+                parsed = schema.model_validate_json(text)
+            except ValidationError as e:
+                raise LLMError(f"fake returned output that does not match {schema.__name__}") from e
+        return self._response(request, text=text, parsed=parsed)
 
     def _find_reply(self, request: LLMRequest) -> Reply:
         prompt = _last_user_message(request)
