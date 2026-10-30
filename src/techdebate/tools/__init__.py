@@ -4,11 +4,13 @@ from techdebate.tools.base import Tool, ToolInput
 from techdebate.tools.defaults import default_tools
 from techdebate.tools.github import GitHubRepoTool, GitHubSearchTool
 from techdebate.tools.http import make_http_client
+from techdebate.tools.pypi import PyPITool
 from techdebate.tools.registry import ToolRegistry
 
 __all__ = [
     "GitHubRepoTool",
     "GitHubSearchTool",
+    "PyPITool",
     "Tool",
     "ToolInput",
     "ToolRegistry",
