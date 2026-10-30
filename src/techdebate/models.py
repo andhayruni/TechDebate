@@ -19,7 +19,7 @@ class Evidence(BaseModel):
     """A fact fetched from a public source by one of the data tools."""
 
     id: str = Field(default_factory=_new_id)
-    source: str  # e.g. "github", "pypi", "arxiv", "hackernews"
+    source: str  # the tool name, e.g. "github_search", "github_repo", "pypi", "arxiv", "youtube"
     query: str
     url: HttpUrl
     title: str
