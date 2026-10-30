@@ -16,3 +16,13 @@ def load_fixture() -> Callable[[str], Any]:
         return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
 
     return load
+
+
+@pytest.fixture
+def load_text_fixture() -> Callable[[str], str]:
+    """Load a recorded response body as it is, e.g. load_text_fixture("arxiv/search_vision_transformer.xml")."""
+
+    def load(name: str) -> str:
+        return (FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+    return load

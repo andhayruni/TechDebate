@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     github_top_n: int = Field(default=5, ge=1, le=100)
     github_activity_days: int = Field(default=90, ge=1)
 
+    # arXiv: how many top papers to return, and how many years the publication trend counts (the current year to date
+    # plus the ones before it; 0 skips it). arXiv asks for at most one request every 3 seconds and the trend costs one
+    # request per year, so each year adds about 3 seconds to a run.
+    arxiv_top_n: int = Field(default=5, ge=1, le=100)
+    arxiv_trend_years: int = Field(default=5, ge=0, le=20)
+    arxiv_request_interval_s: float = Field(default=3.0, ge=0)
+
     run_budget_usd: float = 0.50
     daily_budget_usd: float = 5.00
 
