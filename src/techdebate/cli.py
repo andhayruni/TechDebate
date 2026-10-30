@@ -1,4 +1,8 @@
-"""Command-line entry point. `techdebate ask "<question>"` checks the LLM setup; `run` arrives with the thin slice."""
+"""Command-line entry point.
+
+`techdebate ask "<question>"` checks the LLM setup, and `techdebate evidence <tool> "<query>"` runs one evidence
+tool. `run` arrives with the thin slice.
+"""
 
 import argparse
 import asyncio
@@ -9,7 +13,9 @@ from techdebate.config import get_settings
 from techdebate.errors import TechDebateError
 from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, LLMResponse, Message, ModelTier
 from techdebate.logging_setup import setup_logging
+from techdebate.models import Evidence
 from techdebate.prompts import load_prompt
+from techdebate.tools import ToolRegistry, default_tools, make_http_client
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +39,32 @@ def _make_llm() -> LLMClient:
     return AnthropicLLM(get_settings())
 
 
+async def evidence(registry: ToolRegistry, tool_name: str, query: str) -> list[Evidence]:
+    tool = registry.get(tool_name)
+    return await tool.run(tool.input_model(query=query))
+
+
+async def _evidence_command(tool_name: str, query: str) -> list[Evidence]:
+    settings = get_settings()
+    async with make_http_client(settings) as client:
+        return await evidence(default_tools(settings, client), tool_name, query)
+
+
+def _format_value(value: float) -> str:
+    return f"{int(value):,}" if value.is_integer() else f"{value:,.2f}"
+
+
+def _format_evidence(items: list[Evidence]) -> str:
+    """One numbered block per Evidence, separated by blank lines."""
+    blocks: list[str] = []
+    for n, item in enumerate(items, start=1):
+        title = f"[{n}] {item.title}"
+        if item.value is not None:
+            title += f"  (value: {_format_value(item.value)})"
+        blocks.append(f"{title}\n    {item.summary}\n    {item.url}")
+    return "\n\n".join(blocks)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="techdebate")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show debug logs and full tracebacks")
@@ -46,6 +78,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ask_cmd = sub.add_parser("ask", parents=[common], help="Ask the model one question (checks the API key and client)")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--tier", choices=[t.value for t in ModelTier], default=ModelTier.CHEAP.value)
+    evidence_cmd = sub.add_parser("evidence", parents=[common], help="Run one evidence tool and print what it finds")
+    # A free string, not `choices`: the registry knows which tools are available and lists them on an unknown name.
+    evidence_cmd.add_argument("tool", help="Tool name, e.g. github_search or github_repo")
+    evidence_cmd.add_argument("query", help="Fills the tool's query field")
     return parser
 
 
@@ -61,6 +97,11 @@ def _run(args: argparse.Namespace) -> None:
             f"tokens={usage.input_tokens} in / {usage.output_tokens} out cost=${response.cost_usd:.6f}",
             file=sys.stderr,
         )
+    if args.command == "evidence":
+        items = asyncio.run(_evidence_command(args.tool, args.query))
+        if items:
+            print(_format_evidence(items))
+        print(f"tool={args.tool} query={args.query!r} evidence={len(items)}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:
