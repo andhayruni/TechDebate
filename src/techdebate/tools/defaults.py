@@ -4,6 +4,7 @@ import httpx
 
 from techdebate.config import Settings
 from techdebate.tools.github import GitHubRepoTool, GitHubSearchTool
+from techdebate.tools.pypi import PyPITool
 from techdebate.tools.registry import ToolRegistry
 
 
@@ -13,5 +14,6 @@ def default_tools(settings: Settings, client: httpx.AsyncClient) -> ToolRegistry
         [
             GitHubSearchTool(client, settings),  # works without a token, at a lower rate limit
             GitHubRepoTool(client, settings),
+            PyPITool(client),
         ]
     )
