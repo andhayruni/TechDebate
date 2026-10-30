@@ -48,9 +48,13 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 60.0
     llm_max_retries: int = 3
 
-    # Evidence tools share one HTTP client. Public APIs (Wikimedia, GitHub) ask for a descriptive user agent.
+    # Evidence tools share one HTTP client. Public APIs (GitHub, PyPI, arXiv) ask for a descriptive user agent.
     http_timeout_s: float = 20.0
     http_user_agent: str = Field(default_factory=_default_user_agent)
+
+    # GitHub: how many top repositories github_search returns, and the activity window github_repo counts over.
+    github_top_n: int = Field(default=5, ge=1, le=100)
+    github_activity_days: int = Field(default=90, ge=1)
 
     run_budget_usd: float = 0.50
     daily_budget_usd: float = 5.00
