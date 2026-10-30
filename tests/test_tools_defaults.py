@@ -11,9 +11,9 @@ def _settings(**overrides: Any) -> Settings:
 
 
 @pytest.mark.parametrize("token", [None, "secret"])
-async def test_default_tools_include_github_and_pypi_with_or_without_a_token(token: str | None) -> None:
+async def test_default_tools_include_github_pypi_and_arxiv_with_or_without_a_token(token: str | None) -> None:
     settings = _settings(GITHUB_TOKEN=token)
     async with make_http_client(settings) as client:
         registry = default_tools(settings, client)
 
-    assert [tool.name for tool in registry.tools()] == ["github_search", "github_repo", "pypi"]
+    assert [tool.name for tool in registry.tools()] == ["github_search", "github_repo", "pypi", "arxiv"]
