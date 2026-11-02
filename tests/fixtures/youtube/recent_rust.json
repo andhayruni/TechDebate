@@ -1,0 +1,20 @@
+{
+  "kind": "youtube#searchListResponse",
+  "etag": "0WyDiEidgbq4be2JEz0aVjPDPM4",
+  "nextPageToken": "CAEQAA",
+  "regionCode": "AM",
+  "pageInfo": {
+    "totalResults": 1000000,
+    "resultsPerPage": 1
+  },
+  "items": [
+    {
+      "kind": "youtube#searchResult",
+      "etag": "5XNDQXi0Q1fRYyNtgK_TavAjY4A",
+      "id": {
+        "kind": "youtube#video",
+        "videoId": "tS1PFlTmpuU"
+      }
+    }
+  ]
+}
