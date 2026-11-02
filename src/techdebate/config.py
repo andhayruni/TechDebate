@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     github_token: SecretStr | None = Field(default=None, validation_alias="GITHUB_TOKEN")
+    youtube_api_key: SecretStr | None = Field(default=None, validation_alias="YOUTUBE_API_KEY")
 
     # Cheap tier: relevance checks and query planning. Strong tier: the debate turns.
     cheap_model: str = "claude-haiku-5-5"
@@ -48,7 +49,7 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 60.0
     llm_max_retries: int = 3
 
-    # Evidence tools share one HTTP client. Public APIs (GitHub, PyPI, arXiv) ask for a descriptive user agent.
+    # Evidence tools share one HTTP client. Public APIs (GitHub, PyPI, arXiv, YouTube) ask for a descriptive user agent.
     http_timeout_s: float = 20.0
     http_user_agent: str = Field(default_factory=_default_user_agent)
 
@@ -62,6 +63,9 @@ class Settings(BaseSettings):
     arxiv_top_n: int = Field(default=5, ge=1, le=100)
     arxiv_trend_years: int = Field(default=5, ge=0, le=20)
     arxiv_request_interval_s: float = Field(default=3.0, ge=0)
+
+    # YouTube: how many top videos to return. The API allows at most 50 per search.
+    youtube_top_n: int = Field(default=10, ge=1, le=50)
 
     run_budget_usd: float = 0.50
     daily_budget_usd: float = 5.00

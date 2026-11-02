@@ -7,6 +7,7 @@ from techdebate.tools.github import GitHubRepoTool, GitHubSearchTool
 from techdebate.tools.http import make_http_client
 from techdebate.tools.pypi import PyPITool
 from techdebate.tools.registry import ToolRegistry
+from techdebate.tools.youtube import YouTubeTool
 
 __all__ = [
     "ArxivTool",
@@ -16,6 +17,7 @@ __all__ = [
     "Tool",
     "ToolInput",
     "ToolRegistry",
+    "YouTubeTool",
     "default_tools",
     "make_http_client",
 ]
