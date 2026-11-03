@@ -15,7 +15,7 @@ from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, LLMResponse, Mes
 from techdebate.logging_setup import setup_logging
 from techdebate.models import Evidence
 from techdebate.prompts import load_prompt
-from techdebate.tools import ToolRegistry, default_tools, make_http_client
+from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
 
 log = logging.getLogger(__name__)
 
@@ -48,21 +48,6 @@ async def _evidence_command(tool_name: str, query: str) -> list[Evidence]:
     settings = get_settings()
     async with make_http_client(settings) as client:
         return await evidence(default_tools(settings, client), tool_name, query)
-
-
-def _format_value(value: float) -> str:
-    return f"{int(value):,}" if value.is_integer() else f"{value:,.2f}"
-
-
-def _format_evidence(items: list[Evidence]) -> str:
-    """One numbered block per Evidence, separated by blank lines."""
-    blocks: list[str] = []
-    for n, item in enumerate(items, start=1):
-        title = f"[{n}] {item.title}"
-        if item.value is not None:
-            title += f"  (value: {_format_value(item.value)})"
-        blocks.append(f"{title}\n    {item.summary}\n    {item.url}")
-    return "\n\n".join(blocks)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -100,7 +85,7 @@ def _run(args: argparse.Namespace) -> None:
     if args.command == "evidence":
         items = asyncio.run(_evidence_command(args.tool, args.query))
         if items:
-            print(_format_evidence(items))
+            print(format_evidence(items))
         print(f"tool={args.tool} query={args.query!r} evidence={len(items)}", file=sys.stderr)
 
 

@@ -3,6 +3,7 @@
 from techdebate.tools.arxiv import ArxivTool
 from techdebate.tools.base import Tool, ToolInput
 from techdebate.tools.defaults import default_tools
+from techdebate.tools.format import format_evidence
 from techdebate.tools.github import GitHubRepoTool, GitHubSearchTool
 from techdebate.tools.http import make_http_client
 from techdebate.tools.pypi import PyPITool
@@ -19,5 +20,6 @@ __all__ = [
     "ToolRegistry",
     "YouTubeTool",
     "default_tools",
+    "format_evidence",
     "make_http_client",
 ]
