@@ -22,7 +22,7 @@ class LLMRequest(BaseModel):
     messages: list[Message]
     output_schema: type[BaseModel] | None = None
     max_tokens: int
-    prompt_id: str | None = None  # e.g. "analyst.v1"; metadata only, never sent to the provider
+    prompt_id: str | None = None  # e.g. "developer.v1"; metadata only, never sent to the provider
 
 
 class Usage(BaseModel):

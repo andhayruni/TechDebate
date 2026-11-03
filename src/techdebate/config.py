@@ -37,13 +37,16 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = Field(default=None, validation_alias="GITHUB_TOKEN")
     youtube_api_key: SecretStr | None = Field(default=None, validation_alias="YOUTUBE_API_KEY")
 
-    # Cheap tier: relevance checks and query planning. Strong tier: the debate turns.
+    # Cheap tier: speak decisions and query plans. Strong tier: the debate turns.
     cheap_model: str = "claude-haiku-5-5"
     strong_model: str = "claude-sonnet-5-5"
     # Both models think by default, and thinking counts against max_tokens; low effort keeps cheap calls short.
     cheap_effort: Effort = "low"
     strong_effort: Effort = "high"
     model_prices: dict[str, ModelPrice] = Field(default_factory=_default_prices)
+
+    # Thinking counts against this too, so it leaves room for both.
+    write_max_tokens: int = Field(default=4096, ge=1)
 
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0

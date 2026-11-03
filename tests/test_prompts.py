@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 
 from techdebate.errors import PromptError
-from techdebate.prompts import load_prompt
+from techdebate.prompts import load_prompt, load_prompt_by_id
+from techdebate.roles import ROLE_SPECS, RoleSpec
 
 
 def _write(base: Path, filename: str, text: str) -> None:
@@ -65,3 +66,26 @@ def test_template_syntax_error_raises(tmp_path: Path) -> None:
 def test_default_base_dir_is_the_package() -> None:
     with pytest.raises(PromptError, match="unknown prompt: no_such_prompt"):
         load_prompt("no_such_prompt", version=1)
+
+
+def test_load_by_id_returns_that_version(tmp_path: Path) -> None:
+    _write(tmp_path, "greet.v1.md", "v1")
+    _write(tmp_path, "greet.v2.md", "v2")
+    prompt = load_prompt_by_id("greet.v2", base_dir=tmp_path)
+    assert (prompt.id, prompt.render()) == ("greet.v2", "v2")
+
+
+@pytest.mark.parametrize("prompt_id", ["greet", "greet.v0", "greet.v", "greet.1", "Greet.v1", "../greet.v1", ""])
+def test_load_by_malformed_id_raises(tmp_path: Path, prompt_id: str) -> None:
+    with pytest.raises(PromptError, match="invalid prompt ID"):
+        load_prompt_by_id(prompt_id, base_dir=tmp_path)
+
+
+def test_load_by_id_of_an_unknown_prompt_raises(tmp_path: Path) -> None:
+    with pytest.raises(PromptError, match="unknown prompt: greet"):
+        load_prompt_by_id("greet.v1", base_dir=tmp_path)
+
+
+@pytest.mark.parametrize("role", ROLE_SPECS, ids=lambda role: role.name)
+def test_every_role_prompt_id_resolves_to_a_file(role: RoleSpec) -> None:
+    assert load_prompt_by_id(role.prompt_id).id == role.prompt_id

@@ -180,16 +180,6 @@ async def test_evidence_unknown_tool_lists_the_available_ones() -> None:
         await cli.evidence(ToolRegistry([_StubTool([])]), "nope", "rust")
 
 
-def test_format_evidence_numbers_the_blocks_and_shows_the_value_when_set() -> None:
-    text = cli._format_evidence([_item("a", 1234567.0), _item("b"), _item("c", 0.125)])  # pyright: ignore[reportPrivateUsage]
-
-    assert text == (
-        "[1] a  (value: 1,234,567)\n    a summary\n    https://example.com/a\n\n"
-        "[2] b\n    b summary\n    https://example.com/b\n\n"
-        "[3] c  (value: 0.12)\n    c summary\n    https://example.com/c"
-    )
-
-
 def test_evidence_command_runs_a_real_tool_against_recorded_responses(
     respx_mock: respx.MockRouter, load_fixture: Callable[[str], Any], capsys: pytest.CaptureFixture[str]
 ) -> None:

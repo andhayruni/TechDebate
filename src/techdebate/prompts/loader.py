@@ -1,4 +1,4 @@
-"""Versioned prompt files (<name>.v<N>.md) rendered with Jinja. The ID (e.g. "analyst.v1") goes on every LLM call."""
+"""Versioned prompt files (<name>.v<N>.md) rendered with Jinja. The ID (e.g. "developer.v1") goes on every LLM call."""
 
 import logging
 import re
@@ -13,6 +13,7 @@ from techdebate.errors import PromptError
 log = logging.getLogger(__name__)
 
 _NAME = re.compile(r"[a-z0-9_]+")
+_PROMPT_ID = re.compile(r"([a-z0-9_]+)\.v([1-9][0-9]*)")
 # Prompts are plain text, not HTML, so no autoescaping. StrictUndefined makes a missing variable raise.
 _env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False, keep_trailing_newline=True)
 
@@ -56,6 +57,14 @@ def load_prompt(name: str, *, version: int, base_dir: Traversable | None = None)
         raise PromptError(f"prompt {prompt_id} has a template error on line {e.lineno}: {e.message}") from e
     log.debug("prompt loaded id=%s", prompt_id)
     return Prompt(name=name, version=version, template=template)
+
+
+def load_prompt_by_id(prompt_id: str, *, base_dir: Traversable | None = None) -> Prompt:
+    """Load a prompt from its ID, e.g. "developer.v1"."""
+    match = _PROMPT_ID.fullmatch(prompt_id)
+    if match is None:
+        raise PromptError(f"invalid prompt ID: {prompt_id!r} (expected <name>.v<N>)")
+    return load_prompt(match[1], version=int(match[2]), base_dir=base_dir)
 
 
 def _versions(base: Traversable, name: str) -> list[int]:
