@@ -47,6 +47,12 @@ class Settings(BaseSettings):
 
     # Thinking counts against this too, so it leaves room for both.
     write_max_tokens: int = Field(default=4096, ge=1)
+    decide_max_tokens: int = Field(default=1024, ge=1)
+
+    # Each role waits a random time before it decides, like someone reading the discussion. read_delays=False skips it.
+    read_delay_min_s: float = Field(default=3.0, ge=0)
+    read_delay_max_s: float = Field(default=10.0, ge=0)
+    read_delays: bool = True
 
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0

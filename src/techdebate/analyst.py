@@ -1,17 +1,20 @@
-"""An analyst does a role's work: it gathers evidence with the role's tools and writes turns from it."""
+"""An analyst does a role's work: it decides whether to speak, gathers evidence with the role's tools and writes."""
 
 import asyncio
 import logging
+from typing import cast
 
 from techdebate.config import Settings
 from techdebate.errors import ToolError
 from techdebate.llm import LLMClient, LLMRequest, Message, ModelTier
-from techdebate.models import Evidence, Turn
+from techdebate.models import Evidence, SpeakDecision, Turn
 from techdebate.prompts import load_prompt_by_id
 from techdebate.roles import RoleSpec
 from techdebate.tools import ToolRegistry, format_evidence
 
 log = logging.getLogger(__name__)
+
+_DECIDE_PROMPT_ID = "decide.v1"  # shared by every role
 
 
 class Analyst:
@@ -20,7 +23,22 @@ class Analyst:
         self._llm = llm
         self._tools = tools
         self._write_max_tokens = settings.write_max_tokens
-        self._prompt = load_prompt_by_id(role.prompt_id)  # here, so a bad ID fails before any tool call
+        self._decide_max_tokens = settings.decide_max_tokens
+        # Loaded here, so a bad ID fails before any tool or LLM call.
+        self._write_prompt = load_prompt_by_id(role.prompt_id)
+        self._decide_prompt = load_prompt_by_id(_DECIDE_PROMPT_ID)
+
+    async def decide(self, topic: str) -> SpeakDecision:
+        request = LLMRequest(
+            tier=ModelTier.CHEAP,
+            system=self._decide_prompt.render(display_name=self._role.display_name, question=self._role.question),
+            messages=[Message(role="user", content=f"Topic: {topic}")],
+            output_schema=SpeakDecision,
+            max_tokens=self._decide_max_tokens,
+            prompt_id=self._decide_prompt.id,
+        )
+        response = await self._llm.generate(request)
+        return cast("SpeakDecision", response.parsed)  # a client returns output_schema's type, or raises
 
     async def gather(self, topic: str) -> list[Evidence]:
         """Evidence from every tool that worked, in the role's tool order. Raises ToolError if all of them failed."""
@@ -40,10 +58,10 @@ class Analyst:
         # The instructions are the system prompt. Evidence holds text written by strangers, so it stays out of it.
         request = LLMRequest(
             tier=ModelTier.STRONG,
-            system=self._prompt.render(display_name=self._role.display_name, question=self._role.question),
+            system=self._write_prompt.render(display_name=self._role.display_name, question=self._role.question),
             messages=[Message(role="user", content=_user_message(topic, evidence))],
             max_tokens=self._write_max_tokens,
-            prompt_id=self._prompt.id,
+            prompt_id=self._write_prompt.id,
         )
         response = await self._llm.generate(request)
         return Turn(analyst=self._role.name, text=response.text, cost_usd=response.cost_usd)

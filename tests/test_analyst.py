@@ -11,7 +11,7 @@ from techdebate.analyst import Analyst
 from techdebate.config import Settings
 from techdebate.errors import LLMError, PromptError, ToolError
 from techdebate.llm import FakeLLM, LLMClient, LLMRequest, LLMResponse, ModelTier
-from techdebate.models import Evidence
+from techdebate.models import Evidence, SpeakDecision
 from techdebate.roles import ROLE_SPECS, RoleSpec
 from techdebate.tools import ToolInput, ToolRegistry, default_tools, make_http_client
 
@@ -88,6 +88,57 @@ def test_a_bad_prompt_id_fails_when_the_analyst_is_created() -> None:
     role = RoleSpec(name="x", display_name="X", question="Why?", tool_names=(), prompt_id="malformed")
     with pytest.raises(PromptError, match="invalid prompt ID"):
         Analyst(role, FakeLLM(), ToolRegistry(), _settings())
+
+
+# decide
+
+
+def _decides(decision: SpeakDecision) -> FakeLLM:
+    return FakeLLM(rules=[(lambda _: True, decision)])
+
+
+async def test_decide_builds_the_request_from_the_role_and_the_settings() -> None:
+    llm = _decides(SpeakDecision(speak=True, reply_to=None, reason="In my area."))
+
+    await _analyst(llm=llm, decide_max_tokens=321).decide("Rust")
+
+    [request] = llm.calls
+    assert request.tier is ModelTier.CHEAP
+    assert request.max_tokens == 321
+    assert request.prompt_id == "decide.v1"
+    assert request.output_schema is SpeakDecision
+
+
+async def test_decide_keeps_the_topic_out_of_the_system_prompt() -> None:
+    llm = _decides(SpeakDecision(speak=False, reply_to=None, reason="Not my area."))
+
+    await _analyst(llm=llm).decide("Rust")
+
+    [request] = llm.calls
+    assert "You are the Developer" in request.system
+    assert "Are developers using it?" in request.system
+    assert "Rust" not in request.system
+    [message] = request.messages
+    assert message.role == "user"
+    assert message.content == "Topic: Rust"
+
+
+async def test_decide_returns_the_decision() -> None:
+    decision = SpeakDecision(speak=False, reply_to=None, reason="Not my area.")
+
+    assert await _analyst(llm=_decides(decision)).decide("Rust") == decision
+
+
+async def test_decide_makes_no_tool_call() -> None:
+    tool = _fails("a", KeyError("must not be called"))
+    llm = _decides(SpeakDecision(speak=True, reply_to=None, reason="In my area."))
+
+    await _analyst(tool, llm=llm).decide("Rust")
+
+
+async def test_decide_raises_when_the_reply_does_not_fit_the_schema() -> None:
+    with pytest.raises(LLMError, match="SpeakDecision"):
+        await _analyst(llm=_replies('{"speak": true, "reply_to": 1, "reason": "No turn 1 exists."}')).decide("Rust")
 
 
 # gather
