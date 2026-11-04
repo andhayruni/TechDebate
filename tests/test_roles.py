@@ -4,7 +4,7 @@ import pytest
 
 from techdebate.config import Settings
 from techdebate.models import Evidence
-from techdebate.roles import ROLE_SPECS, RoleRegistry, RoleSpec, default_roles
+from techdebate.roles import ROLE_SPECS, RoleRegistry, RoleSpec, default_roles, display_name
 from techdebate.tools import ToolInput, ToolRegistry, default_tools, make_http_client
 
 
@@ -33,6 +33,17 @@ def _role(name: str, *tool_names: str) -> RoleSpec:
 
 def _settings(youtube_api_key: str | None) -> Settings:
     return Settings(_env_file=None, YOUTUBE_API_KEY=youtube_api_key)  # pyright: ignore[reportCallIssue]
+
+
+# display_name
+
+
+def test_display_name_comes_from_the_role_spec() -> None:
+    assert display_name("developer") == "Developer"
+
+
+def test_display_name_of_an_unknown_role_is_the_name_itself() -> None:
+    assert display_name("retired") == "retired"
 
 
 # RoleRegistry

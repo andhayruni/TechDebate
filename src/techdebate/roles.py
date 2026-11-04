@@ -29,6 +29,11 @@ ROLE_SPECS: tuple[RoleSpec, ...] = (
 )
 
 
+def display_name(role_name: str) -> str:
+    """The role's display name, or the name itself for a role no longer in ROLE_SPECS."""
+    return next((spec.display_name for spec in ROLE_SPECS if spec.name == role_name), role_name)
+
+
 class RoleRegistry:
     def __init__(self, roles: Iterable[RoleSpec] = ()) -> None:
         self._roles: dict[str, RoleSpec] = {}

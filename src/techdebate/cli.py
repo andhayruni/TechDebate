@@ -1,7 +1,7 @@
 """Command-line entry point.
 
-`techdebate ask "<question>"` checks the LLM setup, and `techdebate evidence <tool> "<query>"` runs one evidence
-tool. `run` arrives with the thin slice.
+`techdebate run "<topic>"` runs a debate and prints it, `techdebate ask "<question>"` checks the LLM setup, and
+`techdebate evidence <tool> "<query>"` runs one evidence tool.
 """
 
 import argparse
@@ -13,8 +13,10 @@ from techdebate.config import get_settings
 from techdebate.errors import TechDebateError
 from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, LLMResponse, Message, ModelTier
 from techdebate.logging_setup import setup_logging
-from techdebate.models import Evidence
+from techdebate.models import Debate, Evidence
+from techdebate.orchestrator import run_debate
 from techdebate.prompts import load_prompt
+from techdebate.roles import default_roles, display_name
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
 
 log = logging.getLogger(__name__)
@@ -50,6 +52,21 @@ async def _evidence_command(tool_name: str, query: str) -> list[Evidence]:
         return await evidence(default_tools(settings, client), tool_name, query)
 
 
+async def _debate_command(topic: str, no_delay: bool) -> Debate:
+    settings = get_settings()
+    if no_delay:
+        settings = settings.model_copy(update={"read_delays": False})  # a copy, since get_settings is cached
+    async with make_http_client(settings) as client:
+        tools = default_tools(settings, client)
+        return await run_debate(topic, llm=_make_llm(), roles=default_roles(tools), tools=tools, settings=settings)
+
+
+def _format_debate(debate: Debate) -> str:
+    if not debate.turns:
+        return "Nobody joined the discussion."
+    return "\n\n".join(f"{display_name(turn.analyst)}:\n{turn.text}" for turn in debate.turns)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="techdebate")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show debug logs and full tracebacks")
@@ -60,6 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", parents=[common], help="Run a debate on a technology")
     run.add_argument("topic")
+    run.add_argument("--no-delay", action="store_true", help="Skip the roles' reading delays")
     ask_cmd = sub.add_parser("ask", parents=[common], help="Ask the model one question (checks the API key and client)")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--tier", choices=[t.value for t in ModelTier], default=ModelTier.CHEAP.value)
@@ -72,7 +90,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run(args: argparse.Namespace) -> None:
     if args.command == "run":
-        raise SystemExit("Debate loop not implemented yet.")
+        debate = asyncio.run(_debate_command(args.topic, args.no_delay))
+        print(_format_debate(debate))
+        print(f"topic={debate.topic!r} turns={len(debate.turns)} cost=${debate.total_cost_usd:.6f}", file=sys.stderr)
     if args.command == "ask":
         response = asyncio.run(ask(_make_llm(), args.question, ModelTier(args.tier)))
         print(response.text)
@@ -98,3 +118,6 @@ def main(argv: list[str] | None = None) -> None:
         log.debug("command failed command=%s", args.command, exc_info=True)
         print(f"error: {e}", file=sys.stderr)
         raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        raise SystemExit(130) from None
