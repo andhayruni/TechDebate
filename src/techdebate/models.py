@@ -36,6 +36,14 @@ class Turn(BaseModel):
     created_at: datetime = Field(default_factory=_now)
 
 
+class SpeakDecision(BaseModel):
+    """A role's choice to speak or pass. The model fills this in, so every field is part of the schema it sees."""
+
+    speak: bool
+    reply_to: None  # there are no turns to reply to yet
+    reason: str
+
+
 class DebateStatus(StrEnum):
     RUNNING = "running"
     FINISHED = "finished"
