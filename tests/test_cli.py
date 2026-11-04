@@ -13,7 +13,7 @@ from techdebate.config import Settings
 from techdebate.errors import LLMError, ToolError
 from techdebate.llm import FakeLLM, LLMClient, LLMRequest, LLMResponse, Message, ModelTier
 from techdebate.logging_setup import setup_logging
-from techdebate.models import Evidence
+from techdebate.models import Debate, Evidence, SpeakDecision, Turn
 from techdebate.prompts import load_prompt
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 
@@ -233,3 +233,139 @@ def test_evidence_command_tool_failure_becomes_clean_message(
     assert out == ""
     assert err.startswith("error: github: unknown repository nope/missing")
     assert "Traceback" not in err
+
+
+# run
+
+
+_SPEAK = SpeakDecision(speak=True, reply_to=None, reason="In my area.")
+_PASS = SpeakDecision(speak=False, reply_to=None, reason="Not my area.")
+
+
+def _is_decide(request: LLMRequest) -> bool:
+    return request.prompt_id == "decide.v1"
+
+
+def _is_write(request: LLMRequest) -> bool:
+    return request.prompt_id == "developer.v1"
+
+
+def _use_developer_tools(monkeypatch: pytest.MonkeyPatch, error: ToolError | None = None) -> None:
+    """Stubs under the Developer's real tool names, so default_roles keeps the role. With an error, every tool fails."""
+
+    class _Failing(_StubTool):
+        async def run(self, input: _StubInput) -> list[Evidence]:
+            raise error or ToolError("unreachable")
+
+    tools: list[Tool[Any]] = []
+    for name in ("github_search", "github_repo", "pypi"):
+        tool = _Failing([]) if error else _StubTool([_item(name)])
+        tool.name = name
+        tools.append(tool)
+    _use_registry(monkeypatch, *tools)
+
+
+def test_no_delay_flag_is_off_unless_given() -> None:
+    parser = cli._build_parser()  # pyright: ignore[reportPrivateUsage]
+    assert parser.parse_args(["run", "Rust"]).no_delay is False
+    assert parser.parse_args(["run", "Rust", "--no-delay"]).no_delay is True
+
+
+def test_run_command_prints_the_turn_with_its_author_and_links(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_developer_tools(monkeypatch)
+    text = "Developers use [it](https://example.com/github_search)."
+    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, text)])
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+
+    cli.main(["run", "Rust", "--no-delay"])
+
+    out, err = capsys.readouterr()
+    assert out == f"Developer:\n{text}\n"
+    assert err == "topic='Rust' turns=1 cost=$0.000000\n"
+
+
+def test_run_command_says_so_when_nobody_joins(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_developer_tools(monkeypatch)
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[(_is_decide, _PASS)]))
+
+    cli.main(["run", "Sourdough", "--no-delay"])
+
+    out, err = capsys.readouterr()
+    assert out == "Nobody joined the discussion.\n"
+    assert err == "topic='Sourdough' turns=0 cost=$0.000000\n"
+
+
+def test_format_debate_separates_turns_and_keeps_an_unknown_authors_name() -> None:
+    debate = Debate(topic="Rust", turns=[Turn(analyst="developer", text="One."), Turn(analyst="retired", text="Two.")])
+
+    assert cli._format_debate(debate) == "Developer:\nOne.\n\nretired:\nTwo."  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(("argv", "read_delays"), [([], True), (["--no-delay"], False)])
+def test_run_command_turns_the_delays_off_only_with_the_flag(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], read_delays: bool
+) -> None:
+    cached = Settings(_env_file=None, read_delays=True)  # pyright: ignore[reportCallIssue]
+    seen: list[Settings] = []
+
+    async def record(topic: str, *, settings: Settings, **_: Any) -> Debate:
+        seen.append(settings)
+        return Debate(topic=topic)
+
+    monkeypatch.setattr(cli, "get_settings", lambda: cached)
+    monkeypatch.setattr(cli, "run_debate", record)
+    monkeypatch.setattr(cli, "_make_llm", FakeLLM)
+
+    cli.main(["run", "Rust", *argv])
+
+    assert seen[0].read_delays is read_delays
+    assert cached.read_delays is True  # the cached settings stay untouched
+
+
+def test_run_command_tool_failure_becomes_clean_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_developer_tools(monkeypatch, ToolError("github is down"))
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[(_is_decide, _SPEAK)]))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "Rust", "--no-delay"])
+
+    assert exc.value.code == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    # Each failed tool has already logged its warning, so the error is the last line.
+    assert err.splitlines()[-1].startswith("error: developer: every tool failed: github is down")
+    assert "Traceback" not in err
+
+
+def test_run_command_llm_error_becomes_clean_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def make_llm() -> LLMClient:
+        return _FailingLLM()
+
+    _use_developer_tools(monkeypatch)
+    monkeypatch.setattr(cli, "_make_llm", make_llm)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "Rust", "--no-delay"])
+
+    assert exc.value.code == 1
+    assert capsys.readouterr() == ("", "error: Anthropic rate limit reached, still failing after retries\n")
+
+
+def test_ctrl_c_prints_one_line_and_exits_with_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def interrupt(args: argparse.Namespace) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_run", interrupt)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "Rust"])
+
+    assert exc.value.code == 130
+    assert capsys.readouterr() == ("", "interrupted\n")
