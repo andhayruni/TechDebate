@@ -261,6 +261,12 @@ async def test_write_returns_a_turn_with_the_text_and_the_cost() -> None:
     assert turn.cost_usd == 0.25
 
 
+@pytest.mark.parametrize("text", ["", "  \n "])
+async def test_write_raises_on_blank_text(text: str) -> None:
+    with pytest.raises(LLMError, match=r"developer: fake returned a blank turn"):
+        await _analyst(llm=_replies(text)).write("Rust", [_item("a")])
+
+
 async def test_write_lets_an_llm_error_through() -> None:
     with pytest.raises(LLMError, match="no scripted reply"):
         await _analyst(llm=FakeLLM()).write("Rust", [])

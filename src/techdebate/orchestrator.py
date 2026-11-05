@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Awaitable, Callable
 
 from techdebate.analyst import Analyst
@@ -23,8 +24,18 @@ class _CostMeter:
         self.total_usd = 0.0
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
+        start = time.perf_counter()
         response = await self._llm.generate(request)
         self.total_usd += response.cost_usd
+        log.debug(
+            "llm call prompt=%s model=%s input_tokens=%d output_tokens=%d cost=%.6f duration_s=%.1f",
+            response.prompt_id,
+            response.model,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            response.cost_usd,
+            time.perf_counter() - start,
+        )
         return response
 
 
