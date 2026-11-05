@@ -56,7 +56,7 @@ class Settings(BaseSettings):
 
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0
-    llm_max_retries: int = 3
+    llm_max_retries: int = 1
 
     # Evidence tools share one HTTP client. Public APIs (GitHub, PyPI, arXiv, YouTube) ask for a descriptive user agent.
     http_timeout_s: float = 20.0

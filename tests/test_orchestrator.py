@@ -249,6 +249,20 @@ async def test_the_total_cost_counts_the_decisions_and_the_write() -> None:
     assert debate.turns[0].cost_usd == 0.25  # a turn's cost is only the cost of writing it
 
 
+async def test_each_llm_call_is_logged_at_debug_with_its_numbers(caplog: pytest.LogCaptureFixture) -> None:
+    llm = _PricedLLM(rules=[_decides("developer", _SPEAK), _writes()])
+
+    with caplog.at_level(logging.DEBUG, logger="techdebate.orchestrator"):
+        await _run(llm)
+
+    calls = [r for r in caplog.records if r.getMessage().startswith("llm call ")]
+    assert [r.levelno for r in calls] == [logging.DEBUG, logging.DEBUG]
+    decide, write = (r.getMessage() for r in calls)
+    assert decide.startswith("llm call prompt=decide.v1 model=fake input_tokens=0 output_tokens=0 cost=0.010000 ")
+    assert write.startswith("llm call prompt=developer.v1 model=fake input_tokens=0 output_tokens=0 cost=0.250000 ")
+    assert "duration_s=" in decide and "duration_s=" in write
+
+
 async def test_the_total_cost_counts_the_decisions_when_everyone_passes() -> None:
     llm = _PricedLLM(rules=[_decides("developer", _PASS)])
 

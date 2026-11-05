@@ -5,7 +5,7 @@ import logging
 from typing import cast
 
 from techdebate.config import Settings
-from techdebate.errors import ToolError
+from techdebate.errors import LLMError, ToolError
 from techdebate.llm import LLMClient, LLMRequest, Message, ModelTier
 from techdebate.models import Evidence, SpeakDecision, Turn
 from techdebate.prompts import load_prompt_by_id
@@ -64,6 +64,11 @@ class Analyst:
             prompt_id=self._write_prompt.id,
         )
         response = await self._llm.generate(request)
+        if not response.text.strip():
+            # Thinking counts against max_tokens, so a call can use it all and return no text.
+            raise LLMError(
+                f"{self._role.name}: {response.model} returned a blank turn (write_max_tokens may be too low)"
+            )
         return Turn(analyst=self._role.name, text=response.text, cost_usd=response.cost_usd)
 
     async def _call_tool(self, name: str, topic: str) -> list[Evidence] | ToolError:
