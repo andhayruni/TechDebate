@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     write_max_tokens: int = Field(default=4096, ge=1)
     decide_max_tokens: int = Field(default=1024, ge=1)
 
+    # How many queries a role's decision can run per tool. Each costs quota: at 2, a Developer run makes 6-8 GitHub
+    # searches, under the limit of 10 a minute without a token.
+    max_queries_per_tool: int = Field(default=2, ge=1)
+
     # Each role waits a random time before it decides, like someone reading the discussion. read_delays=False skips it.
     read_delay_min_s: float = Field(default=3.0, ge=0)
     read_delay_max_s: float = Field(default=10.0, ge=0)

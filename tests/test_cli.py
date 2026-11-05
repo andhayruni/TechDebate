@@ -238,8 +238,15 @@ def test_evidence_command_tool_failure_becomes_clean_message(
 # run
 
 
-_SPEAK = SpeakDecision(speak=True, reply_to=None, reason="In my area.")
-_PASS = SpeakDecision(speak=False, reply_to=None, reason="Not my area.")
+_SPEAK = SpeakDecision(
+    speak=True,
+    reply_to=None,
+    queries={"github_search": ["rust"], "github_repo": ["rust-lang/rust"], "pypi": ["rust"]},
+    reason="In my area.",
+)
+_PASS = SpeakDecision(
+    speak=False, reply_to=None, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area."
+)
 
 
 def _is_decide(request: LLMRequest) -> bool:
@@ -326,20 +333,19 @@ def test_run_command_turns_the_delays_off_only_with_the_flag(
     assert cached.read_delays is True  # the cached settings stay untouched
 
 
-def test_run_command_tool_failure_becomes_clean_message(
+def test_run_command_still_prints_a_turn_when_every_tool_fails(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _use_developer_tools(monkeypatch, ToolError("github is down"))
-    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[(_is_decide, _SPEAK)]))
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["run", "Rust", "--no-delay"])
+    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, "From general knowledge, it is used.")])
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    assert exc.value.code == 1
+    cli.main(["run", "Rust", "--no-delay"])
+
     out, err = capsys.readouterr()
-    assert out == ""
-    # Each failed tool has already logged its warning, so the error is the last line.
-    assert err.splitlines()[-1].startswith("error: developer: every tool failed: github is down")
-    assert "Traceback" not in err
+    assert out == "Developer:\nFrom general knowledge, it is used.\n"
+    assert err.count("tool failed") == 3  # each failed tool still logs its warning
+    assert err.splitlines()[-1] == "topic='Rust' turns=1 cost=$0.000000"
 
 
 def test_run_command_llm_error_becomes_clean_message(

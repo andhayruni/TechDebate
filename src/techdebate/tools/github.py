@@ -14,7 +14,7 @@ import httpx
 from pydantic import Field, HttpUrl
 
 from techdebate.config import Settings
-from techdebate.errors import ToolError
+from techdebate.errors import NotFoundError, ToolError
 from techdebate.models import Evidence
 from techdebate.tools.base import ToolInput
 
@@ -151,7 +151,7 @@ class GitHubRepoTool:
 
         response = await _get(self._client, f"/repos/{full_name}", self._headers, allow=(404,))
         if response.status_code == 404:
-            raise ToolError(f"github: unknown repository {full_name}")
+            raise NotFoundError(f"github: unknown repository {full_name}")
         repo: dict[str, Any] = response.json()
         # Use the canonical name from here on: the input may differ in case, or name a renamed repository.
         full_name = repo["full_name"]
@@ -175,7 +175,7 @@ class GitHubRepoTool:
             "items"
         ]
         if not items:
-            raise ToolError(f"github: no repository matches {query!r}")
+            raise NotFoundError(f"github: no repository matches {query!r}")
         return items[0]["full_name"]
 
     def _info(self, query: str, repo: dict[str, Any]) -> Evidence:

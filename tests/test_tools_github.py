@@ -7,7 +7,7 @@ import pytest
 import respx
 
 from techdebate.config import Settings
-from techdebate.errors import ToolError
+from techdebate.errors import NotFoundError, ToolError
 from techdebate.tools import GitHubRepoTool, GitHubSearchTool, Tool, make_http_client
 from techdebate.tools.github import GitHubRepoInput, GitHubSearchInput
 
@@ -271,7 +271,7 @@ async def test_unknown_repo_raises_tool_error(
 ) -> None:
     respx_mock.get(host=HOST, path="/repos/nope/missing").respond(404, json=load_fixture("github_repo/not_found.json"))
 
-    with pytest.raises(ToolError, match="unknown repository nope/missing"):
+    with pytest.raises(NotFoundError, match="unknown repository nope/missing"):
         await _repo(client).run(GitHubRepoInput(query="nope/missing"))
 
 
@@ -308,5 +308,5 @@ async def test_keywords_without_a_match_raise_tool_error(
 ) -> None:
     respx_mock.get(host=HOST, path="/search/repositories").respond(json=load_fixture("github_search/empty.json"))
 
-    with pytest.raises(ToolError, match="no repository matches 'zzqxvbnmkplw'"):
+    with pytest.raises(NotFoundError, match="no repository matches 'zzqxvbnmkplw'"):
         await _repo(client).run(GitHubRepoInput(query="zzqxvbnmkplw"))

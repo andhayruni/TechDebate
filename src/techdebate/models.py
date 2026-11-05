@@ -41,6 +41,7 @@ class SpeakDecision(BaseModel):
 
     speak: bool
     reply_to: None  # there are no turns to reply to yet
+    queries: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])  # per tool; empty: the tool doesn't fit
     reason: str
 
 
