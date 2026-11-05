@@ -15,12 +15,6 @@ from techdebate.models import Evidence, SpeakDecision
 from techdebate.roles import ROLE_SPECS, RoleSpec
 from techdebate.tools import ToolInput, ToolRegistry, default_tools, make_http_client
 
-GITHUB = "api.github.com"
-PYPI = "pypi.org"
-STATS = "pypistats.org"
-
-Fixture = Callable[[str], Any]
-
 
 class _StubInput(ToolInput):
     query: str
@@ -275,31 +269,8 @@ async def test_write_lets_an_llm_error_through() -> None:
 # The real Developer tools, on recorded responses
 
 
-def _mock_github(respx_mock: respx.MockRouter, load_fixture: Fixture) -> None:
-    """github_repo resolves keywords with per_page=1, and every other search is github_search's."""
-    respx_mock.get(host=GITHUB, path="/search/repositories", params={"per_page": "1"}).respond(
-        json=load_fixture("github_repo/search_top_hit.json")
-    )
-    respx_mock.get(host=GITHUB, path="/search/repositories").respond(json=load_fixture("github_search/rust.json"))
-    respx_mock.get(host=GITHUB, path="/repos/fastapi/fastapi").respond(
-        json={**load_fixture("github_repo/repo_rust.json"), "full_name": "fastapi/fastapi", "description": "Fast API"}
-    )
-    respx_mock.get(host=GITHUB, path="/repos/fastapi/fastapi/commits").respond(json=[])
-    respx_mock.get(host=GITHUB, path="/repos/fastapi/fastapi/releases/latest").respond(404)
-    respx_mock.get(host=GITHUB, path="/search/issues").respond(json={"total_count": 0})
-
-
-def _mock_pypi(respx_mock: respx.MockRouter, load_fixture: Fixture) -> None:
-    respx_mock.get(host=PYPI, path="/pypi/httpx/json").respond(json=load_fixture("pypi/package_httpx.json"))
-    respx_mock.get(host=STATS, path="/api/packages/httpx/recent").respond(json=load_fixture("pypi/recent_httpx.json"))
-    respx_mock.get(host=STATS, path="/api/packages/httpx/overall").respond(json=load_fixture("pypi/overall_httpx.json"))
-
-
-async def test_gather_and_write_with_the_real_developer_tools(
-    respx_mock: respx.MockRouter, load_fixture: Fixture
-) -> None:
-    _mock_github(respx_mock, load_fixture)
-    _mock_pypi(respx_mock, load_fixture)
+@pytest.mark.usefixtures("mock_github", "mock_pypi")
+async def test_gather_and_write_with_the_real_developer_tools() -> None:
     llm = _replies("Developers are building with it.")
     settings = _settings()
 
@@ -315,11 +286,9 @@ async def test_gather_and_write_with_the_real_developer_tools(
     assert turn.text == "Developers are building with it."
 
 
-async def test_real_tools_carry_on_when_pypi_does_not_know_the_topic(
-    respx_mock: respx.MockRouter, load_fixture: Fixture
-) -> None:
-    _mock_github(respx_mock, load_fixture)
-    respx_mock.get(host=PYPI, path="/pypi/httpx/json").respond(404)
+@pytest.mark.usefixtures("mock_github")
+async def test_real_tools_carry_on_when_pypi_does_not_know_the_topic(respx_mock: respx.MockRouter) -> None:
+    respx_mock.get(host="pypi.org", path="/pypi/httpx/json").respond(404)
     settings = _settings()
 
     async with make_http_client(settings) as client:
