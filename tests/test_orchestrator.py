@@ -14,8 +14,8 @@ from techdebate.orchestrator import run_debate
 from techdebate.roles import RoleRegistry, RoleSpec
 from techdebate.tools import ToolInput, ToolRegistry
 
-_SPEAK = SpeakDecision(speak=True, reply_to=None, reason="In my area.")
-_PASS = SpeakDecision(speak=False, reply_to=None, reason="Not my area.")
+_SPEAK = SpeakDecision(speak=True, reply_to=None, queries={"stub": ["rust lang"]}, reason="In my area.")
+_PASS = SpeakDecision(speak=False, reply_to=None, queries={"stub": []}, reason="Not my area.")
 _PRICES = {"decide.v1": 0.01, "developer.v1": 0.25}
 
 
@@ -100,7 +100,7 @@ async def test_a_role_that_speaks_gathers_and_writes_one_turn() -> None:
     [turn] = debate.turns
     assert turn.analyst == "developer"
     assert turn.text == "Developers use [it](https://example.com/x)."
-    assert tool.queries == ["Rust"]
+    assert tool.queries == ["rust lang"]  # the decision's query, not the topic
     assert _prompt_ids(llm) == ["decide.v1", "developer.v1"]
     assert "https://example.com/x" in llm.calls[1].messages[0].content
 
@@ -223,13 +223,25 @@ async def test_a_bad_prompt_id_fails_before_any_waiting_or_llm_call() -> None:
     assert llm.calls == []
 
 
-async def test_a_tool_error_goes_up_when_every_tool_fails() -> None:
-    llm = FakeLLM(rules=[_decides("developer", _SPEAK), _writes()])
+async def test_a_role_still_writes_when_every_tool_fails() -> None:
+    llm = FakeLLM(rules=[_decides("developer", _SPEAK), _writes("From general knowledge, it is used.")])
 
-    with pytest.raises(ToolError, match="every tool failed"):
-        await _run(llm, tool=_StubTool(error=ToolError("stub: down")))
+    debate = await _run(llm, tool=_StubTool(error=ToolError("stub: down")))
 
-    assert _prompt_ids(llm) == ["decide.v1"]  # nothing spent on writing
+    assert debate.turns[0].text == "From general knowledge, it is used."
+    assert 'stub, query "rust lang": the tool failed' in llm.calls[1].messages[0].content
+
+
+async def test_a_role_that_speaks_with_no_queries_writes_without_calling_a_tool() -> None:
+    no_tools = SpeakDecision(speak=True, reply_to=None, queries={"stub": []}, reason="Nothing to search.")
+    llm = FakeLLM(rules=[_decides("developer", no_tools), _writes("From general knowledge, it is used.")])
+    tool = _StubTool()
+
+    debate = await _run(llm, tool=tool)
+
+    assert debate.turns[0].text == "From general knowledge, it is used."
+    assert tool.queries == []
+    assert llm.calls[1].messages[0].content.endswith("stub: not used")
 
 
 async def test_an_llm_error_goes_up() -> None:

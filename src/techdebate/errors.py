@@ -9,6 +9,10 @@ class ToolError(TechDebateError):
     """An evidence tool failed."""
 
 
+class NotFoundError(ToolError):
+    """An evidence tool worked, and found nothing under that name."""
+
+
 class LLMError(TechDebateError):
     """The model provider call failed."""
 

@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 from pydantic import Field, HttpUrl
 
-from techdebate.errors import ToolError
+from techdebate.errors import NotFoundError, ToolError
 from techdebate.models import Evidence
 from techdebate.tools.base import ToolInput
 
@@ -83,11 +83,11 @@ class PyPITool:
     async def run(self, input: PyPIInput) -> list[Evidence]:
         query = input.query.strip()
         if not _NAME.match(query):
-            raise ToolError(f"pypi: not a package name: {query!r}")
+            raise NotFoundError(f"pypi: not a package name: {query!r}")
 
         response = await _get(self._client, f"{PYPI}/pypi/{query}/json")
         if response.status_code == 404:
-            raise ToolError(f"pypi: unknown package {query}")
+            raise NotFoundError(f"pypi: unknown package {query}")
         package: dict[str, Any] = response.json()
         # The canonical name from here on; pypistats wants it in lowercase.
         name: str = package["info"]["name"]

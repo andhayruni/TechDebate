@@ -49,7 +49,7 @@ async def run_debate(
     rng: random.Random | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> Debate:
-    """A finished debate with no turns means every role passed. ToolError and LLMError go up to the caller."""
+    """A finished debate with no turns means every role passed. LLMError goes up to the caller."""
     rng = rng if rng is not None else random.Random()
     meter = _CostMeter(llm)
     # Built up front, so a bad prompt ID fails before any waiting or spending.
@@ -62,8 +62,8 @@ async def run_debate(
         decision = await analyst.decide(topic)
         log.info("role decided role=%s speak=%s reason=%s", role.name, decision.speak, decision.reason)
         if decision.speak:
-            evidence = await analyst.gather(topic)
-            debate.turns.append(await analyst.write(topic, evidence))
+            results = await analyst.gather(decision.queries)
+            debate.turns.append(await analyst.write(topic, results))
             break
 
     debate.status = DebateStatus.FINISHED

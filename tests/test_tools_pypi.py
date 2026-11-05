@@ -6,7 +6,7 @@ import pytest
 import respx
 
 from techdebate.config import Settings
-from techdebate.errors import ToolError
+from techdebate.errors import NotFoundError, ToolError
 from techdebate.tools import PyPITool, Tool, make_http_client
 from techdebate.tools.pypi import PyPIInput
 
@@ -141,7 +141,7 @@ async def test_a_mixed_case_name_uses_the_canonical_lowercase_name_for_pypistats
 async def test_unknown_package_raises(client: httpx.AsyncClient, respx_mock: respx.MockRouter) -> None:
     respx_mock.get(host=PYPI, path="/pypi/nope-xx/json").respond(404, json={"message": "Not Found"})
 
-    with pytest.raises(ToolError, match=r"^pypi: unknown package nope-xx$"):
+    with pytest.raises(NotFoundError, match=r"^pypi: unknown package nope-xx$"):
         await PyPITool(client).run(PyPIInput(query="nope-xx"))
 
 
@@ -149,7 +149,7 @@ async def test_unknown_package_raises(client: httpx.AsyncClient, respx_mock: res
 async def test_a_query_that_is_not_a_package_name_raises_without_a_request(
     client: httpx.AsyncClient, respx_mock: respx.MockRouter, query: str
 ) -> None:
-    with pytest.raises(ToolError, match=r"^pypi: not a package name"):
+    with pytest.raises(NotFoundError, match=r"^pypi: not a package name"):
         await PyPITool(client).run(PyPIInput(query=query))
 
     assert not respx_mock.calls
