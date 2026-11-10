@@ -11,9 +11,10 @@ from pydantic import HttpUrl
 from techdebate import cli
 from techdebate.config import Settings
 from techdebate.errors import LLMError, ToolError
-from techdebate.llm import FakeLLM, LLMClient, LLMRequest, LLMResponse, Message, ModelTier
+from techdebate.llm import FakeLLM, LLMClient, LLMRequest, LLMResponse, ModelTier
+from techdebate.llm import Message as LLMMessage
 from techdebate.logging_setup import setup_logging
-from techdebate.models import Debate, Evidence, SpeakDecision, Turn
+from techdebate.models import Evidence, Message, SpeakDecision, User, UserKind
 from techdebate.prompts import load_prompt
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 
@@ -66,7 +67,7 @@ async def test_ask_builds_request_from_ask_prompt(tier: ModelTier) -> None:
     [request] = llm.calls
     assert request.tier == tier
     assert request.prompt_id == "ask.v1"
-    assert request.messages == [Message(role="user", content="What is Rust?")]
+    assert request.messages == [LLMMessage(role="user", content="What is Rust?")]
     assert request.max_tokens == 1024
     # The real ask.v1 file ships in the package and is what gets sent.
     assert request.system == load_prompt("ask", version=1).render()
@@ -272,80 +273,94 @@ def _use_developer_tools(monkeypatch: pytest.MonkeyPatch, error: ToolError | Non
     _use_registry(monkeypatch, *tools)
 
 
-def test_no_delay_flag_is_off_unless_given() -> None:
-    parser = cli._build_parser()  # pyright: ignore[reportPrivateUsage]
-    assert parser.parse_args(["run", "Rust"]).no_delay is False
-    assert parser.parse_args(["run", "Rust", "--no-delay"]).no_delay is True
+def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
+    """A local .env can't change the result."""
+    settings = Settings(_env_file=None, **overrides)  # pyright: ignore[reportCallIssue]
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
 
 
-def test_run_command_prints_the_turn_with_its_author_and_links(
+def test_run_has_no_delay_flag() -> None:
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(["run", "Rust", "--no-delay"])  # pyright: ignore[reportPrivateUsage]
+
+
+def test_run_command_prints_the_post_and_the_comment_with_its_ai_label(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    _use_settings(monkeypatch)
     _use_developer_tools(monkeypatch)
     text = "Developers use [it](https://example.com/github_search)."
     llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, text)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "Rust", "--no-delay"])
+    cli.main(["run", "Rust"])
 
     out, err = capsys.readouterr()
-    assert out == f"Developer:\n{text}\n"
-    assert err == "topic='Rust' turns=1 cost=$0.000000\n"
+    assert out == f"me:\nRust\n\n  Developer [AI]:\n  {text}\n"
+    assert err == "comments=1 cost=$0.000000\n"
 
 
-def test_run_command_says_so_when_nobody_joins(
+def test_run_command_says_so_when_nobody_comments(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    _use_settings(monkeypatch, username="alice")
     _use_developer_tools(monkeypatch)
     monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[(_is_decide, _PASS)]))
 
-    cli.main(["run", "Sourdough", "--no-delay"])
+    cli.main(["run", "Sourdough"])
 
     out, err = capsys.readouterr()
-    assert out == "Nobody joined the discussion.\n"
-    assert err == "topic='Sourdough' turns=0 cost=$0.000000\n"
+    assert out == "alice:\nSourdough\n\n  No comments.\n"
+    assert err == "comments=0 cost=$0.000000\n"
 
 
-def test_format_debate_separates_turns_and_keeps_an_unknown_authors_name() -> None:
-    debate = Debate(topic="Rust", turns=[Turn(analyst="developer", text="One."), Turn(analyst="retired", text="Two.")])
-
-    assert cli._format_debate(debate) == "Developer:\nOne.\n\nretired:\nTwo."  # pyright: ignore[reportPrivateUsage]
-
-
-@pytest.mark.parametrize(("argv", "read_delays"), [([], True), (["--no-delay"], False)])
-def test_run_command_turns_the_delays_off_only_with_the_flag(
-    monkeypatch: pytest.MonkeyPatch, argv: list[str], read_delays: bool
-) -> None:
-    cached = Settings(_env_file=None, read_delays=True)  # pyright: ignore[reportCallIssue]
-    seen: list[Settings] = []
-
-    async def record(topic: str, *, settings: Settings, **_: Any) -> Debate:
-        seen.append(settings)
-        return Debate(topic=topic)
-
-    monkeypatch.setattr(cli, "get_settings", lambda: cached)
-    monkeypatch.setattr(cli, "run_debate", record)
-    monkeypatch.setattr(cli, "_make_llm", FakeLLM)
-
-    cli.main(["run", "Rust", *argv])
-
-    assert seen[0].read_delays is read_delays
-    assert cached.read_delays is True  # the cached settings stay untouched
-
-
-def test_run_command_still_prints_a_turn_when_every_tool_fails(
+def test_run_command_prints_the_cost_of_every_call(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    class _Priced(FakeLLM):
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            response = await super().generate(request)
+            return response.model_copy(update={"cost_usd": 0.01 if _is_decide(request) else 0.25})
+
+    _use_settings(monkeypatch)
+    _use_developer_tools(monkeypatch)
+    monkeypatch.setattr(cli, "_make_llm", lambda: _Priced(rules=[(_is_decide, _SPEAK), (_is_write, "Used.")]))
+
+    cli.main(["run", "Rust"])
+
+    assert capsys.readouterr().err == "comments=1 cost=$0.260000\n"
+
+
+def test_format_post_indents_each_comment_and_labels_only_agents() -> None:
+    me = User(username="me", kind=UserKind.REAL)
+    developer = User(username="developer", kind=UserKind.AGENT)
+    retired = User(username="retired", kind=UserKind.AGENT)
+    post = Message(author_id=me.id, text="Is Rust\ngrowing?")
+    comments = [
+        Message(post_id=post.id, parent_id=post.id, author_id=author.id, text=text)
+        for author, text in ((developer, "Yes.\nIt is."), (retired, "Two."))
+    ]
+    users = {user.id: user for user in (me, developer, retired)}
+
+    assert cli._format_post(post, comments, users) == (  # pyright: ignore[reportPrivateUsage]
+        "me:\nIs Rust\ngrowing?\n\n  Developer [AI]:\n  Yes.\n  It is.\n\n  retired [AI]:\n  Two."
+    )
+
+
+def test_run_command_still_prints_a_comment_when_every_tool_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_settings(monkeypatch)
     _use_developer_tools(monkeypatch, ToolError("github is down"))
     llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, "From general knowledge, it is used.")])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "Rust", "--no-delay"])
+    cli.main(["run", "Rust"])
 
     out, err = capsys.readouterr()
-    assert out == "Developer:\nFrom general knowledge, it is used.\n"
+    assert out == "me:\nRust\n\n  Developer [AI]:\n  From general knowledge, it is used.\n"
     assert err.count("tool failed") == 3  # each failed tool still logs its warning
-    assert err.splitlines()[-1] == "topic='Rust' turns=1 cost=$0.000000"
+    assert err.splitlines()[-1] == "comments=1 cost=$0.000000"
 
 
 def test_run_command_llm_error_becomes_clean_message(
@@ -354,10 +369,11 @@ def test_run_command_llm_error_becomes_clean_message(
     def make_llm() -> LLMClient:
         return _FailingLLM()
 
+    _use_settings(monkeypatch)
     _use_developer_tools(monkeypatch)
     monkeypatch.setattr(cli, "_make_llm", make_llm)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", "Rust", "--no-delay"])
+        cli.main(["run", "Rust"])
 
     assert exc.value.code == 1
     assert capsys.readouterr() == ("", "error: Anthropic rate limit reached, still failing after retries\n")

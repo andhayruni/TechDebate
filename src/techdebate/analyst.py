@@ -1,4 +1,5 @@
-"""An analyst does a role's work: it decides whether to speak and what to search for, gathers evidence and writes."""
+"""An analyst does an agent's work: it decides whether to comment and what to search for, gathers evidence and writes
+the comment."""
 
 import asyncio
 import logging
@@ -11,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, create_model
 from techdebate.config import Settings
 from techdebate.errors import LLMError, NotFoundError, ToolError
 from techdebate.llm import LLMClient, LLMRequest, Message, ModelTier
-from techdebate.models import Evidence, SpeakDecision, Turn
+from techdebate.models import Evidence, SpeakDecision
 from techdebate.prompts import load_prompt_by_id
 from techdebate.roles import RoleSpec
 from techdebate.tools import ToolRegistry, format_evidence
@@ -78,7 +79,8 @@ class Analyst:
         )
         return [result for results in per_tool for result in results]
 
-    async def write(self, topic: str, results: list[ToolResult]) -> Turn:
+    async def write(self, topic: str, results: list[ToolResult]) -> str:
+        """The text of the comment."""
         # The instructions are the system prompt. Tool results hold text written by strangers, so they stay out of it.
         request = LLMRequest(
             tier=ModelTier.STRONG,
@@ -91,9 +93,9 @@ class Analyst:
         if not response.text.strip():
             # Thinking counts against max_tokens, so a call can use it all and return no text.
             raise LLMError(
-                f"{self._role.name}: {response.model} returned a blank turn (write_max_tokens may be too low)"
+                f"{self._role.name}: {response.model} returned a blank comment (write_max_tokens may be too low)"
             )
-        return Turn(analyst=self._role.name, text=response.text, cost_usd=response.cost_usd)
+        return response.text
 
     def _describe_tool(self, name: str) -> dict[str, str]:
         tool = self._tools.get(name)

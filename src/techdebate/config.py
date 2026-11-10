@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = Field(default=None, validation_alias="GITHUB_TOKEN")
     youtube_api_key: SecretStr | None = Field(default=None, validation_alias="YOUTUBE_API_KEY")
 
-    # Cheap tier: speak decisions and query plans. Strong tier: the debate turns.
+    # Cheap tier: speak decisions and query plans. Strong tier: the comments.
     cheap_model: str = "claude-haiku-5-5"
     strong_model: str = "claude-sonnet-5-5"
     # Both models think by default, and thinking counts against max_tokens; low effort keeps cheap calls short.
@@ -52,11 +52,6 @@ class Settings(BaseSettings):
     # How many queries a role's decision can run per tool. Each costs quota: at 2, a Developer run makes 6-8 GitHub
     # searches, under the limit of 10 a minute without a token.
     max_queries_per_tool: int = Field(default=2, ge=1)
-
-    # Each role waits a random time before it decides, like someone reading the discussion. read_delays=False skips it.
-    read_delay_min_s: float = Field(default=3.0, ge=0)
-    read_delay_max_s: float = Field(default=10.0, ge=0)
-    read_delays: bool = True
 
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0
@@ -80,7 +75,10 @@ class Settings(BaseSettings):
     # YouTube: how many top videos to return. The API allows at most 50 per search.
     youtube_top_n: int = Field(default=10, ge=1, le=50)
 
-    run_budget_usd: float = 0.50
+    # The real user who writes from the command line. Each agent's username is its role's name.
+    username: str = "me"
+
+    post_budget_usd: float = 0.50
     daily_budget_usd: float = 5.00
 
     db_path: str = "techdebate.db"

@@ -1,20 +1,22 @@
 """Command-line entry point.
 
-`techdebate run "<topic>"` runs a debate and prints it, `techdebate ask "<question>"` checks the LLM setup, and
-`techdebate evidence <tool> "<query>"` runs one evidence tool.
+`techdebate run "<text>"` makes a post, lets the agents comment on it and prints both, `techdebate ask "<question>"`
+checks the LLM setup, and `techdebate evidence <tool> "<query>"` runs one evidence tool.
 """
 
 import argparse
 import asyncio
 import logging
 import sys
+import textwrap
 
 from techdebate.config import get_settings
 from techdebate.errors import TechDebateError
-from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, LLMResponse, Message, ModelTier
+from techdebate.llm import AnthropicLLM, CostMeter, LLMClient, LLMRequest, LLMResponse, ModelTier
+from techdebate.llm import Message as LLMMessage
 from techdebate.logging_setup import setup_logging
-from techdebate.models import Debate, Evidence
-from techdebate.orchestrator import run_debate
+from techdebate.models import Evidence, Message, User, UserKind
+from techdebate.orchestrator import check_post
 from techdebate.prompts import load_prompt
 from techdebate.roles import default_roles, display_name
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
@@ -30,7 +32,7 @@ async def ask(llm: LLMClient, question: str, tier: ModelTier) -> LLMResponse:
     request = LLMRequest(
         tier=tier,
         system=prompt.render(),
-        messages=[Message(role="user", content=question)],
+        messages=[LLMMessage(role="user", content=question)],
         max_tokens=_ASK_MAX_TOKENS,
         prompt_id=prompt.id,
     )
@@ -52,19 +54,33 @@ async def _evidence_command(tool_name: str, query: str) -> list[Evidence]:
         return await evidence(default_tools(settings, client), tool_name, query)
 
 
-async def _debate_command(topic: str, no_delay: bool) -> Debate:
+async def _run_command(text: str, meter: CostMeter) -> tuple[Message, list[Message], dict[str, User]]:
+    """The post, its comments, and every user by ID. The users exist only in memory for now."""
     settings = get_settings()
-    if no_delay:
-        settings = settings.model_copy(update={"read_delays": False})  # a copy, since get_settings is cached
+    me = User(username=settings.username, kind=UserKind.REAL)
+    post = Message(author_id=me.id, text=text)
     async with make_http_client(settings) as client:
         tools = default_tools(settings, client)
-        return await run_debate(topic, llm=_make_llm(), roles=default_roles(tools), tools=tools, settings=settings)
+        roles = default_roles(tools)
+        agents = {role.name: User(username=role.name, kind=UserKind.AGENT) for role in roles.roles()}
+        comments = await check_post(post, agents=agents, llm=meter, roles=roles, tools=tools, settings=settings)
+    users = {user.id: user for user in (me, *agents.values())}
+    return post, comments, users
 
 
-def _format_debate(debate: Debate) -> str:
-    if not debate.turns:
-        return "Nobody joined the discussion."
-    return "\n\n".join(f"{display_name(turn.analyst)}:\n{turn.text}" for turn in debate.turns)
+def _shown_name(user: User) -> str:
+    """An agent's name always carries the AI label."""
+    if user.kind is UserKind.AGENT:
+        return f"{display_name(user.username)} [AI]"
+    return user.username
+
+
+def _format_post(post: Message, comments: list[Message], users: dict[str, User]) -> str:
+    def block(message: Message) -> str:
+        return f"{_shown_name(users[message.author_id])}:\n{message.text}"
+
+    below = "\n\n".join(block(comment) for comment in comments) if comments else "No comments."
+    return f"{block(post)}\n\n{textwrap.indent(below, '  ')}"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -75,9 +91,8 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
 
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", parents=[common], help="Run a debate on a technology")
-    run.add_argument("topic")
-    run.add_argument("--no-delay", action="store_true", help="Skip the roles' reading delays")
+    run = sub.add_parser("run", parents=[common], help="Write a post and let every agent comment on it")
+    run.add_argument("text", help="The text of the post")
     ask_cmd = sub.add_parser("ask", parents=[common], help="Ask the model one question (checks the API key and client)")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--tier", choices=[t.value for t in ModelTier], default=ModelTier.CHEAP.value)
@@ -90,9 +105,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run(args: argparse.Namespace) -> None:
     if args.command == "run":
-        debate = asyncio.run(_debate_command(args.topic, args.no_delay))
-        print(_format_debate(debate))
-        print(f"topic={debate.topic!r} turns={len(debate.turns)} cost=${debate.total_cost_usd:.6f}", file=sys.stderr)
+        meter = CostMeter(_make_llm())
+        post, comments, users = asyncio.run(_run_command(args.text, meter))
+        print(_format_post(post, comments, users))
+        print(f"comments={len(comments)} cost=${meter.total_usd:.6f}", file=sys.stderr)
     if args.command == "ask":
         response = asyncio.run(ask(_make_llm(), args.question, ModelTier(args.tier)))
         print(response.text)

@@ -2,9 +2,10 @@
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Self
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 def _new_id() -> str:
@@ -28,34 +29,42 @@ class Evidence(BaseModel):
     fetched_at: datetime = Field(default_factory=_now)
 
 
-class Turn(BaseModel):
-    id: str = Field(default_factory=_new_id)
-    analyst: str
-    text: str
-    cost_usd: float = 0.0
-    created_at: datetime = Field(default_factory=_now)
-
-
 class SpeakDecision(BaseModel):
     """A role's choice to speak or pass. The model fills this in, so every field is part of the schema it sees."""
 
     speak: bool
-    reply_to: None  # there are no turns to reply to yet
+    reply_to: None  # there are no comments to reply to yet
     queries: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])  # per tool; empty: the tool doesn't fit
     reason: str
 
 
-class DebateStatus(StrEnum):
-    RUNNING = "running"
-    FINISHED = "finished"
-    BUDGET_EXCEEDED = "budget_exceeded"
-    FAILED = "failed"
+class UserKind(StrEnum):
+    AGENT = "agent"
+    REAL = "real"
 
 
-class Debate(BaseModel):
+class User(BaseModel):
+    """Anyone who writes: an AI agent or a real user. Both kinds share one set of usernames."""
+
     id: str = Field(default_factory=_new_id)
-    topic: str
-    status: DebateStatus = DebateStatus.RUNNING
-    turns: list[Turn] = Field(default_factory=list[Turn])
-    total_cost_usd: float = 0.0
+    username: str  # an agent's username is its role's name
+    kind: UserKind
     created_at: datetime = Field(default_factory=_now)
+
+
+class Message(BaseModel):
+    """A post or a comment. A post has no parent and no post. A comment answers its parent (the post or another
+    comment), and post_id is the post at the root of its tree, so all of a post's comments are found in one lookup."""
+
+    id: str = Field(default_factory=_new_id)
+    post_id: str | None = None
+    parent_id: str | None = None
+    author_id: str
+    text: str
+    created_at: datetime = Field(default_factory=_now)
+
+    @model_validator(mode="after")
+    def _post_or_comment(self) -> Self:
+        if (self.post_id is None) != (self.parent_id is None):
+            raise ValueError("a post has neither post_id nor parent_id, and a comment has both")
+        return self

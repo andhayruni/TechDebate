@@ -11,7 +11,7 @@ from pydantic import HttpUrl
 from techdebate.analyst import Analyst, ToolResult
 from techdebate.config import Settings
 from techdebate.errors import LLMError, NotFoundError, PromptError, ToolError
-from techdebate.llm import FakeLLM, LLMClient, LLMRequest, LLMResponse, ModelTier
+from techdebate.llm import FakeLLM, LLMClient, ModelTier
 from techdebate.models import Evidence, SpeakDecision
 from techdebate.roles import ROLE_SPECS, RoleSpec
 from techdebate.tools import ToolInput, ToolRegistry, default_tools, make_http_client
@@ -347,30 +347,23 @@ async def test_write_reports_each_outcome_per_query() -> None:
 async def test_write_still_runs_with_no_evidence_at_all() -> None:
     llm = _replies("From general knowledge, it is widely used.")
 
-    turn = await _analyst(llm=llm).write("Rust", [ToolResult(tool="a", query=None)])
+    text = await _analyst(llm=llm).write("Rust", [ToolResult(tool="a", query=None)])
 
-    assert turn.text == "From general knowledge, it is widely used."
+    assert text == "From general knowledge, it is widely used."
     assert llm.calls[0].messages[0].content == "Topic: Rust\n\nTool results:\n\na: not used"
 
 
-async def test_write_returns_a_turn_with_the_text_and_the_cost() -> None:
-    class _PricedLLM(FakeLLM):
-        async def generate(self, request: LLMRequest) -> LLMResponse:
-            response = await super().generate(request)
-            return response.model_copy(update={"cost_usd": 0.25})
+async def test_write_returns_the_text_of_the_comment_as_written() -> None:
+    llm = _replies("See [the repo](https://example.com/a).")
 
-    llm = _PricedLLM(rules=[(lambda _: True, "See [the repo](https://example.com/a).")])
+    text = await _analyst(llm=llm).write("Rust", [_found("a")])
 
-    turn = await _analyst(llm=llm).write("Rust", [_found("a")])
-
-    assert turn.analyst == "developer"
-    assert turn.text == "See [the repo](https://example.com/a)."
-    assert turn.cost_usd == 0.25
+    assert text == "See [the repo](https://example.com/a)."
 
 
 @pytest.mark.parametrize("text", ["", "  \n "])
 async def test_write_raises_on_blank_text(text: str) -> None:
-    with pytest.raises(LLMError, match=r"developer: fake returned a blank turn"):
+    with pytest.raises(LLMError, match=r"developer: fake returned a blank comment"):
         await _analyst(llm=_replies(text)).write("Rust", [_found("a")])
 
 
@@ -393,13 +386,13 @@ async def test_gather_and_write_with_the_real_developer_tools() -> None:
     async with make_http_client(settings) as client:
         analyst = Analyst(ROLE_SPECS[0], llm, default_tools(settings, client), settings)
         results = await analyst.gather(_HTTPX)
-    turn = await analyst.write("httpx", results)
+    text = await analyst.write("httpx", results)
 
     assert [r.tool for r in results] == list(ROLE_SPECS[0].tool_names)
     content = llm.calls[0].messages[0].content
     assert all(str(e.url) in content for r in results for e in r.evidence)
     assert all(r.evidence for r in results)
-    assert turn.text == "Developers are building with it."
+    assert text == "Developers are building with it."
 
 
 @pytest.mark.usefixtures("mock_github")
