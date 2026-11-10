@@ -13,8 +13,9 @@ from techdebate.config import Settings
 from techdebate.errors import LLMError, ToolError
 from techdebate.llm import FakeLLM, LLMClient, LLMRequest, LLMResponse, ModelTier
 from techdebate.llm import Message as LLMMessage
+from techdebate.llm.fake import Predicate, Reply
 from techdebate.logging_setup import setup_logging
-from techdebate.models import Evidence, Message, SpeakDecision, User, UserKind
+from techdebate.models import Evidence, Message, ResearchPlan, SpeakDecision, User, UserKind
 from techdebate.prompts import load_prompt
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 
@@ -239,19 +240,27 @@ def test_evidence_command_tool_failure_becomes_clean_message(
 # run
 
 
-_SPEAK = SpeakDecision(
+_RESEARCH = ResearchPlan(
     speak=True,
-    reply_to=None,
     queries={"github_search": ["rust"], "github_repo": ["rust-lang/rust"], "pypi": ["rust"]},
     reason="In my area.",
 )
-_PASS = SpeakDecision(
-    speak=False, reply_to=None, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area."
-)
+_SKIP = ResearchPlan(speak=False, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area.")
+
+
+def _is_research(request: LLMRequest) -> bool:
+    return request.prompt_id == "research.v1"
 
 
 def _is_decide(request: LLMRequest) -> bool:
     return request.prompt_id == "decide.v1"
+
+
+# The research and decide calls of an agent that comments on the post.
+_COMMENTS: list[tuple[Predicate, Reply]] = [
+    (_is_research, _RESEARCH),
+    (_is_decide, SpeakDecision(reply_to=[0], reason="The data is new.")),
+]
 
 
 def _is_write(request: LLMRequest) -> bool:
@@ -290,7 +299,7 @@ def test_run_command_prints_the_post_and_the_comment_with_its_ai_label(
     _use_settings(monkeypatch)
     _use_developer_tools(monkeypatch)
     text = "Developers use [it](https://example.com/github_search)."
-    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, text)])
+    llm = FakeLLM(rules=[*_COMMENTS, (_is_write, text)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "Rust"])
@@ -305,7 +314,7 @@ def test_run_command_says_so_when_nobody_comments(
 ) -> None:
     _use_settings(monkeypatch, username="alice")
     _use_developer_tools(monkeypatch)
-    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[(_is_decide, _PASS)]))
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[(_is_research, _SKIP)]))
 
     cli.main(["run", "Sourdough"])
 
@@ -320,15 +329,15 @@ def test_run_command_prints_the_cost_of_every_call(
     class _Priced(FakeLLM):
         async def generate(self, request: LLMRequest) -> LLMResponse:
             response = await super().generate(request)
-            return response.model_copy(update={"cost_usd": 0.01 if _is_decide(request) else 0.25})
+            return response.model_copy(update={"cost_usd": 0.25 if _is_write(request) else 0.01})
 
     _use_settings(monkeypatch)
     _use_developer_tools(monkeypatch)
-    monkeypatch.setattr(cli, "_make_llm", lambda: _Priced(rules=[(_is_decide, _SPEAK), (_is_write, "Used.")]))
+    monkeypatch.setattr(cli, "_make_llm", lambda: _Priced(rules=[*_COMMENTS, (_is_write, "Used.")]))
 
     cli.main(["run", "Rust"])
 
-    assert capsys.readouterr().err == "comments=1 cost=$0.260000\n"
+    assert capsys.readouterr().err == "comments=1 cost=$0.270000\n"  # research, decide and write
 
 
 def test_format_post_indents_each_comment_and_labels_only_agents() -> None:
@@ -352,7 +361,7 @@ def test_run_command_still_prints_a_comment_when_every_tool_fails(
 ) -> None:
     _use_settings(monkeypatch)
     _use_developer_tools(monkeypatch, ToolError("github is down"))
-    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, "From general knowledge, it is used.")])
+    llm = FakeLLM(rules=[*_COMMENTS, (_is_write, "From general knowledge, it is used.")])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "Rust"])

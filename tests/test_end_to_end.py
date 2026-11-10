@@ -6,24 +6,26 @@ import respx
 from techdebate import cli
 from techdebate.config import Settings
 from techdebate.llm import FakeLLM, LLMRequest
-from techdebate.models import SpeakDecision
+from techdebate.models import ResearchPlan, SpeakDecision
 
-_SPEAK = SpeakDecision(
+_RESEARCH = ResearchPlan(
     speak=True,
-    reply_to=None,
     queries={"github_search": ["httpx"], "github_repo": ["httpx"], "pypi": ["httpx"]},
     reason="Developers use this.",
 )
-_NO_PYPI = SpeakDecision(
+_NO_PYPI = ResearchPlan(
     speak=True,
-    reply_to=None,
     queries={"github_search": ["httpx"], "github_repo": ["httpx"], "pypi": []},
     reason="Developers use this, but it is not a package.",
 )
-_PASS = SpeakDecision(
-    speak=False, reply_to=None, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area."
-)
+_SKIP = ResearchPlan(speak=False, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area.")
+_COMMENT_ON_POST = SpeakDecision(reply_to=[0], reason="The download numbers are new.")
+_NOTHING_NEW = SpeakDecision(reply_to=[], reason="The results only repeat the post.")
 _COMMENT = "Developers use it, with [heavy downloads](https://pypistats.org/packages/httpx)."
+
+
+def _is_research(request: LLMRequest) -> bool:
+    return request.prompt_id == "research.v1"
 
 
 def _is_decide(request: LLMRequest) -> bool:
@@ -41,41 +43,60 @@ def _no_local_env(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[r
 
 
 @pytest.mark.usefixtures("mock_github", "mock_pypi")
-def test_the_developer_speaks(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, _COMMENT)])
+def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    llm = FakeLLM(rules=[(_is_research, _RESEARCH), (_is_decide, _COMMENT_ON_POST), (_is_write, _COMMENT)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "httpx"])
 
-    decide, write = llm.calls
-    assert (decide.prompt_id, write.prompt_id) == ("decide.v1", "developer.v1")
-    assert decide.messages[0].content == "Topic: httpx"
-    content = write.messages[0].content
-    assert content.startswith('Topic: httpx\n\nTool results:\n\ngithub_search, query "httpx":\n')
+    research, decide, write = llm.calls
+    assert (research.prompt_id, decide.prompt_id, write.prompt_id) == ("research.v1", "decide.v1", "developer.v1")
+    assert research.messages[0].content == "Post: httpx"
+    # The decide and the write calls get the same report, under their own label until U2.3.
+    report = decide.messages[0].content.removeprefix("Post: httpx")
+    assert write.messages[0].content == f"Topic: httpx{report}"
+    assert report.startswith('\n\nTool results:\n\ngithub_search, query "httpx":\n')
     for url in (
         "https://github.com/search?q=httpx&type=repositories",  # github_search
         "https://github.com/fastapi/fastapi/commits",  # github_repo
         "https://pypi.org/project/httpx/",  # pypi
     ):
-        assert url in content
-    assert "httpx" not in write.system
-    assert "You are the Developer" in write.system
+        assert url in report
+    for call in (research, decide, write):
+        assert "httpx" not in call.system
+        assert "You are the Developer" in call.system
 
     out, err = capsys.readouterr()
     assert out == f"me:\nhttpx\n\n  Developer [AI]:\n  {_COMMENT}\n"
     assert err == "comments=1 cost=$0.000000\n"  # nothing else, so no tool failed
 
 
-def test_the_developer_passes(
+def test_the_developer_passes_at_the_research_call(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], respx_mock: respx.MockRouter
 ) -> None:
-    llm = FakeLLM(rules=[(_is_decide, _PASS)])
+    llm = FakeLLM(rules=[(_is_research, _SKIP)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "httpx"])
 
-    assert [request.prompt_id for request in llm.calls] == ["decide.v1"]
+    assert [request.prompt_id for request in llm.calls] == ["research.v1"]
     assert respx_mock.calls.call_count == 0
+    out, err = capsys.readouterr()
+    assert out == "me:\nhttpx\n\n  No comments.\n"
+    assert err == "comments=0 cost=$0.000000\n"
+
+
+@pytest.mark.usefixtures("mock_github", "mock_pypi")
+def test_the_developer_researches_and_then_passes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], respx_mock: respx.MockRouter
+) -> None:
+    llm = FakeLLM(rules=[(_is_research, _RESEARCH), (_is_decide, _NOTHING_NEW)])
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+
+    cli.main(["run", "httpx"])
+
+    assert [request.prompt_id for request in llm.calls] == ["research.v1", "decide.v1"]
+    assert respx_mock.calls.call_count > 0  # the searches ran
     out, err = capsys.readouterr()
     assert out == "me:\nhttpx\n\n  No comments.\n"
     assert err == "comments=0 cost=$0.000000\n"
@@ -85,7 +106,7 @@ def test_the_developer_passes(
 def test_the_developer_leaves_out_a_tool_that_does_not_fit(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    llm = FakeLLM(rules=[(_is_decide, _NO_PYPI), (_is_write, _COMMENT)])
+    llm = FakeLLM(rules=[(_is_research, _NO_PYPI), (_is_decide, _COMMENT_ON_POST), (_is_write, _COMMENT)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "httpx"])  # a request to PyPI would have no mock, and fail the test
@@ -99,14 +120,14 @@ def test_a_comment_is_still_written_when_every_source_is_down(
 ) -> None:
     respx_mock.route().respond(500)
     text = "From general knowledge, it is used, though my searches failed."
-    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, text)])
+    llm = FakeLLM(rules=[(_is_research, _RESEARCH), (_is_decide, _COMMENT_ON_POST), (_is_write, text)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "httpx"])
 
-    content = llm.calls[1].messages[0].content
-    for tool in ("github_search", "github_repo", "pypi"):
-        assert f'{tool}, query "httpx": the tool failed' in content
+    for call in llm.calls[1:]:  # the decide and the write calls
+        for tool in ("github_search", "github_repo", "pypi"):
+            assert f'{tool}, query "httpx": the tool failed' in call.messages[0].content
     out, err = capsys.readouterr()
     assert out == f"me:\nhttpx\n\n  Developer [AI]:\n  {text}\n"
     assert err.count("tool failed") == 3
