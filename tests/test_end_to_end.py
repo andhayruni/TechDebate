@@ -23,7 +23,7 @@ _NO_PYPI = SpeakDecision(
 _PASS = SpeakDecision(
     speak=False, reply_to=None, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area."
 )
-_TURN = "Developers use it, with [heavy downloads](https://pypistats.org/packages/httpx)."
+_COMMENT = "Developers use it, with [heavy downloads](https://pypistats.org/packages/httpx)."
 
 
 def _is_decide(request: LLMRequest) -> bool:
@@ -42,10 +42,10 @@ def _no_local_env(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[r
 
 @pytest.mark.usefixtures("mock_github", "mock_pypi")
 def test_the_developer_speaks(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, _TURN)])
+    llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, _COMMENT)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx", "--no-delay"])
+    cli.main(["run", "httpx"])
 
     decide, write = llm.calls
     assert (decide.prompt_id, write.prompt_id) == ("decide.v1", "developer.v1")
@@ -62,8 +62,8 @@ def test_the_developer_speaks(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Ca
     assert "You are the Developer" in write.system
 
     out, err = capsys.readouterr()
-    assert out == f"Developer:\n{_TURN}\n"
-    assert err == "topic='httpx' turns=1 cost=$0.000000\n"  # nothing else, so no tool failed
+    assert out == f"me:\nhttpx\n\n  Developer [AI]:\n  {_COMMENT}\n"
+    assert err == "comments=1 cost=$0.000000\n"  # nothing else, so no tool failed
 
 
 def test_the_developer_passes(
@@ -72,29 +72,29 @@ def test_the_developer_passes(
     llm = FakeLLM(rules=[(_is_decide, _PASS)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx", "--no-delay"])
+    cli.main(["run", "httpx"])
 
     assert [request.prompt_id for request in llm.calls] == ["decide.v1"]
     assert respx_mock.calls.call_count == 0
     out, err = capsys.readouterr()
-    assert out == "Nobody joined the discussion.\n"
-    assert err == "topic='httpx' turns=0 cost=$0.000000\n"
+    assert out == "me:\nhttpx\n\n  No comments.\n"
+    assert err == "comments=0 cost=$0.000000\n"
 
 
 @pytest.mark.usefixtures("mock_github")
 def test_the_developer_leaves_out_a_tool_that_does_not_fit(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    llm = FakeLLM(rules=[(_is_decide, _NO_PYPI), (_is_write, _TURN)])
+    llm = FakeLLM(rules=[(_is_decide, _NO_PYPI), (_is_write, _COMMENT)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx", "--no-delay"])  # a request to PyPI would have no mock, and fail the test
+    cli.main(["run", "httpx"])  # a request to PyPI would have no mock, and fail the test
 
     assert llm.calls[1].messages[0].content.endswith("pypi: not used")
-    assert capsys.readouterr().err == "topic='httpx' turns=1 cost=$0.000000\n"
+    assert capsys.readouterr().err == "comments=1 cost=$0.000000\n"
 
 
-def test_a_turn_is_still_written_when_every_source_is_down(
+def test_a_comment_is_still_written_when_every_source_is_down(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], respx_mock: respx.MockRouter
 ) -> None:
     respx_mock.route().respond(500)
@@ -102,11 +102,11 @@ def test_a_turn_is_still_written_when_every_source_is_down(
     llm = FakeLLM(rules=[(_is_decide, _SPEAK), (_is_write, text)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx", "--no-delay"])
+    cli.main(["run", "httpx"])
 
     content = llm.calls[1].messages[0].content
     for tool in ("github_search", "github_repo", "pypi"):
         assert f'{tool}, query "httpx": the tool failed' in content
     out, err = capsys.readouterr()
-    assert out == f"Developer:\n{text}\n"
+    assert out == f"me:\nhttpx\n\n  Developer [AI]:\n  {text}\n"
     assert err.count("tool failed") == 3

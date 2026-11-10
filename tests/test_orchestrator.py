@@ -1,5 +1,4 @@
 import logging
-import random
 from typing import Any
 
 import pytest
@@ -7,10 +6,10 @@ from pydantic import HttpUrl
 
 from techdebate.config import Settings
 from techdebate.errors import LLMError, PromptError, ToolError
-from techdebate.llm import FakeLLM, LLMRequest, LLMResponse
+from techdebate.llm import CostMeter, FakeLLM, LLMRequest, LLMResponse
 from techdebate.llm.fake import Predicate, Reply
-from techdebate.models import Debate, DebateStatus, Evidence, SpeakDecision
-from techdebate.orchestrator import run_debate
+from techdebate.models import Evidence, Message, SpeakDecision, User, UserKind
+from techdebate.orchestrator import check_post
 from techdebate.roles import RoleRegistry, RoleSpec
 from techdebate.tools import ToolInput, ToolRegistry
 
@@ -51,6 +50,10 @@ class _PricedLLM(FakeLLM):
         return response.model_copy(update={"cost_usd": _PRICES[request.prompt_id or ""]})
 
 
+_ME = User(username="me", kind=UserKind.REAL)
+_POST = Message(author_id=_ME.id, text="Rust")
+
+
 def _role(name: str = "developer", prompt_id: str = "developer.v1") -> RoleSpec:
     return RoleSpec(
         name=name, display_name=name.title(), question="Who uses it?", tool_names=("stub",), prompt_id=prompt_id
@@ -58,7 +61,7 @@ def _role(name: str = "developer", prompt_id: str = "developer.v1") -> RoleSpec:
 
 
 def _settings(**overrides: Any) -> Settings:
-    return Settings(_env_file=None, **{"read_delays": False, **overrides})  # pyright: ignore[reportCallIssue]
+    return Settings(_env_file=None, **overrides)  # pyright: ignore[reportCallIssue]
 
 
 def _decides(name: str, decision: SpeakDecision) -> tuple[Predicate, Reply]:
@@ -68,19 +71,30 @@ def _decides(name: str, decision: SpeakDecision) -> tuple[Predicate, Reply]:
     return matches, decision
 
 
-def _writes(text: str = "Developers use it.") -> tuple[Predicate, Reply]:
-    return (lambda request: request.prompt_id == "developer.v1"), text
+def _writes(text: str = "Developers use it.", name: str | None = None) -> tuple[Predicate, Reply]:
+    def matches(request: LLMRequest) -> bool:
+        return request.prompt_id == "developer.v1" and (name is None or f"You are the {name.title()}" in request.system)
+
+    return matches, text
 
 
 def _prompt_ids(llm: FakeLLM) -> list[str | None]:
     return [request.prompt_id for request in llm.calls]
 
 
-async def _run(llm: FakeLLM, *roles: RoleSpec, tool: _StubTool | None = None) -> Debate:
-    return await run_debate(
-        "Rust",
+def _agents(*roles: RoleSpec) -> dict[str, User]:
+    return {role.name: User(username=role.name, kind=UserKind.AGENT) for role in roles}
+
+
+async def _run(
+    llm: FakeLLM | CostMeter, *roles: RoleSpec, tool: _StubTool | None = None, agents: dict[str, User] | None = None
+) -> list[Message]:
+    roles = roles or (_role(),)
+    return await check_post(
+        _POST,
+        agents=agents if agents is not None else _agents(*roles),
         llm=llm,
-        roles=RoleRegistry(roles or [_role()]),
+        roles=RoleRegistry(roles),
         tools=ToolRegistry([tool or _StubTool()]),
         settings=_settings(),
     )
@@ -89,59 +103,73 @@ async def _run(llm: FakeLLM, *roles: RoleSpec, tool: _StubTool | None = None) ->
 # Speak and pass
 
 
-async def test_a_role_that_speaks_gathers_and_writes_one_turn() -> None:
+async def test_an_agent_that_speaks_gathers_and_comments_on_the_post() -> None:
     llm = FakeLLM(rules=[_decides("developer", _SPEAK), _writes("Developers use [it](https://example.com/x).")])
     tool = _StubTool()
+    agents = _agents(_role())
 
-    debate = await _run(llm, tool=tool)
+    [comment] = await _run(llm, tool=tool, agents=agents)
 
-    assert debate.topic == "Rust"
-    assert debate.status is DebateStatus.FINISHED
-    [turn] = debate.turns
-    assert turn.analyst == "developer"
-    assert turn.text == "Developers use [it](https://example.com/x)."
-    assert tool.queries == ["rust lang"]  # the decision's query, not the topic
+    assert comment.text == "Developers use [it](https://example.com/x)."
+    assert comment.author_id == agents["developer"].id
+    assert (comment.post_id, comment.parent_id) == (_POST.id, _POST.id)  # a top-level comment
+    assert tool.queries == ["rust lang"]  # the decision's query, not the post
     assert _prompt_ids(llm) == ["decide.v1", "developer.v1"]
+    assert llm.calls[0].messages[0].content == "Topic: Rust"  # the post's text, until the prompts speak of posts
     assert "https://example.com/x" in llm.calls[1].messages[0].content
 
 
-async def test_when_every_role_passes_the_debate_finishes_with_no_turns() -> None:
+async def test_when_every_agent_passes_there_are_no_comments() -> None:
     llm = FakeLLM(rules=[_decides("developer", _PASS)])
     tool = _StubTool()
 
-    debate = await _run(llm, tool=tool)
+    comments = await _run(llm, tool=tool)
 
-    assert debate.status is DebateStatus.FINISHED
-    assert debate.turns == []
+    assert comments == []
     assert tool.queries == []
     assert _prompt_ids(llm) == ["decide.v1"]
 
 
-async def test_with_no_roles_the_debate_finishes_with_no_turns() -> None:
+async def test_with_no_agents_there_are_no_comments() -> None:
     llm = FakeLLM()
 
-    debate = await run_debate("Rust", llm=llm, roles=RoleRegistry(), tools=ToolRegistry(), settings=_settings())
+    comments = await check_post(
+        _POST, agents={}, llm=llm, roles=RoleRegistry(), tools=ToolRegistry(), settings=_settings()
+    )
 
-    assert debate.status is DebateStatus.FINISHED
-    assert debate.turns == []
+    assert comments == []
     assert llm.calls == []
 
 
-async def test_the_first_role_to_speak_ends_the_run() -> None:
-    llm = FakeLLM(rules=[_decides("first", _SPEAK), _writes()])
+async def test_two_agents_both_comment_on_one_post_in_registration_order() -> None:
+    first, second = _role("first"), _role("second")
+    llm = FakeLLM(
+        rules=[
+            _decides("first", _SPEAK),
+            _decides("second", _SPEAK),
+            _writes("First view.", "first"),
+            _writes("Second view.", "second"),
+        ]
+    )
+    agents = _agents(first, second)
 
-    debate = await _run(llm, _role("first"), _role("second"))
+    comments = await _run(llm, first, second, agents=agents)
 
-    assert [turn.analyst for turn in debate.turns] == ["first"]
-    assert _prompt_ids(llm) == ["decide.v1", "developer.v1"]  # the second role never decided
+    assert [(c.author_id, c.text) for c in comments] == [
+        (agents["first"].id, "First view."),
+        (agents["second"].id, "Second view."),
+    ]
+    assert all((c.post_id, c.parent_id) == (_POST.id, _POST.id) for c in comments)
+    assert _prompt_ids(llm) == ["decide.v1", "developer.v1", "decide.v1", "developer.v1"]
 
 
-async def test_the_next_role_gets_its_moment_after_a_pass() -> None:
+async def test_an_agent_after_a_pass_still_gets_its_look() -> None:
     llm = FakeLLM(rules=[_decides("first", _PASS), _decides("second", _SPEAK), _writes()])
+    agents = _agents(_role("first"), _role("second"))
 
-    debate = await _run(llm, _role("first"), _role("second"))
+    comments = await _run(llm, _role("first"), _role("second"), agents=agents)
 
-    assert [turn.analyst for turn in debate.turns] == ["second"]
+    assert [c.author_id for c in comments] == [agents["second"].id]
 
 
 async def test_each_decision_and_its_reason_is_logged_at_info(caplog: pytest.LogCaptureFixture) -> None:
@@ -151,95 +179,40 @@ async def test_each_decision_and_its_reason_is_logged_at_info(caplog: pytest.Log
         await _run(llm, _role("first"), _role("second"))
 
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, "role decided role=first speak=False reason=Not my area."),
-        (logging.INFO, "role decided role=second speak=True reason=In my area."),
+        (logging.INFO, f"agent decided post_id={_POST.id} agent=first speak=False reason=Not my area."),
+        (logging.INFO, f"agent decided post_id={_POST.id} agent=second speak=True reason=In my area."),
     ]
-
-
-# Reading delays
-
-
-async def test_each_role_waits_its_delay_before_it_decides() -> None:
-    llm = FakeLLM(rules=[_decides("first", _PASS), _decides("second", _PASS)])
-    waited: list[tuple[float, int]] = []
-
-    async def sleep(seconds: float) -> None:
-        waited.append((seconds, len(llm.calls)))
-
-    await run_debate(
-        "Rust",
-        llm=llm,
-        roles=RoleRegistry([_role("first"), _role("second")]),
-        tools=ToolRegistry([_StubTool()]),
-        settings=_settings(read_delays=True, read_delay_min_s=3, read_delay_max_s=10),
-        rng=random.Random(7),
-        sleep=sleep,
-    )
-
-    expected = random.Random(7)
-    assert waited == [(expected.uniform(3, 10), 0), (expected.uniform(3, 10), 1)]
-    assert all(3 <= seconds <= 10 for seconds, _ in waited)
-
-
-async def test_read_delays_off_skips_the_waiting() -> None:
-    waited: list[float] = []
-
-    async def sleep(seconds: float) -> None:
-        waited.append(seconds)
-
-    await run_debate(
-        "Rust",
-        llm=FakeLLM(rules=[_decides("developer", _PASS)]),
-        roles=RoleRegistry([_role()]),
-        tools=ToolRegistry([_StubTool()]),
-        settings=_settings(read_delays=False),
-        sleep=sleep,
-    )
-
-    assert waited == []
 
 
 # Errors
 
 
-async def test_a_bad_prompt_id_fails_before_any_waiting_or_llm_call() -> None:
+async def test_a_bad_prompt_id_fails_before_any_llm_call() -> None:
     llm = FakeLLM(rules=[_decides("first", _PASS)])
-    waited: list[float] = []
-
-    async def sleep(seconds: float) -> None:
-        waited.append(seconds)
 
     with pytest.raises(PromptError, match="invalid prompt ID"):
-        await run_debate(
-            "Rust",
-            llm=llm,
-            roles=RoleRegistry([_role("first"), _role("second", prompt_id="malformed")]),
-            tools=ToolRegistry([_StubTool()]),
-            settings=_settings(read_delays=True),
-            sleep=sleep,
-        )
+        await _run(llm, _role("first"), _role("second", prompt_id="malformed"))
 
-    assert waited == []
     assert llm.calls == []
 
 
-async def test_a_role_still_writes_when_every_tool_fails() -> None:
+async def test_an_agent_still_comments_when_every_tool_fails() -> None:
     llm = FakeLLM(rules=[_decides("developer", _SPEAK), _writes("From general knowledge, it is used.")])
 
-    debate = await _run(llm, tool=_StubTool(error=ToolError("stub: down")))
+    [comment] = await _run(llm, tool=_StubTool(error=ToolError("stub: down")))
 
-    assert debate.turns[0].text == "From general knowledge, it is used."
+    assert comment.text == "From general knowledge, it is used."
     assert 'stub, query "rust lang": the tool failed' in llm.calls[1].messages[0].content
 
 
-async def test_a_role_that_speaks_with_no_queries_writes_without_calling_a_tool() -> None:
+async def test_an_agent_that_speaks_with_no_queries_comments_without_calling_a_tool() -> None:
     no_tools = SpeakDecision(speak=True, reply_to=None, queries={"stub": []}, reason="Nothing to search.")
     llm = FakeLLM(rules=[_decides("developer", no_tools), _writes("From general knowledge, it is used.")])
     tool = _StubTool()
 
-    debate = await _run(llm, tool=tool)
+    [comment] = await _run(llm, tool=tool)
 
-    assert debate.turns[0].text == "From general knowledge, it is used."
+    assert comment.text == "From general knowledge, it is used."
     assert tool.queries == []
     assert llm.calls[1].messages[0].content.endswith("stub: not used")
 
@@ -252,33 +225,16 @@ async def test_an_llm_error_goes_up() -> None:
 # Cost
 
 
-async def test_the_total_cost_counts_the_decisions_and_the_write() -> None:
-    llm = _PricedLLM(rules=[_decides("first", _PASS), _decides("second", _SPEAK), _writes()])
+async def test_a_meter_passed_in_counts_the_decisions_and_the_write() -> None:
+    meter = CostMeter(_PricedLLM(rules=[_decides("first", _PASS), _decides("second", _SPEAK), _writes()]))
 
-    debate = await _run(llm, _role("first"), _role("second"))
+    await _run(meter, _role("first"), _role("second"))
 
-    assert debate.total_cost_usd == pytest.approx(0.27)
-    assert debate.turns[0].cost_usd == 0.25  # a turn's cost is only the cost of writing it
-
-
-async def test_each_llm_call_is_logged_at_debug_with_its_numbers(caplog: pytest.LogCaptureFixture) -> None:
-    llm = _PricedLLM(rules=[_decides("developer", _SPEAK), _writes()])
-
-    with caplog.at_level(logging.DEBUG, logger="techdebate.orchestrator"):
-        await _run(llm)
-
-    calls = [r for r in caplog.records if r.getMessage().startswith("llm call ")]
-    assert [r.levelno for r in calls] == [logging.DEBUG, logging.DEBUG]
-    decide, write = (r.getMessage() for r in calls)
-    assert decide.startswith("llm call prompt=decide.v1 model=fake input_tokens=0 output_tokens=0 cost=0.010000 ")
-    assert write.startswith("llm call prompt=developer.v1 model=fake input_tokens=0 output_tokens=0 cost=0.250000 ")
-    assert "duration_s=" in decide and "duration_s=" in write
+    assert meter.total_usd == pytest.approx(0.27)
 
 
-async def test_the_total_cost_counts_the_decisions_when_everyone_passes() -> None:
-    llm = _PricedLLM(rules=[_decides("developer", _PASS)])
+async def test_a_meter_passed_in_counts_the_decisions_when_everyone_passes() -> None:
+    meter = CostMeter(_PricedLLM(rules=[_decides("developer", _PASS)]))
 
-    debate = await _run(llm)
-
-    assert debate.turns == []
-    assert debate.total_cost_usd == pytest.approx(0.01)
+    assert await _run(meter) == []
+    assert meter.total_usd == pytest.approx(0.01)
