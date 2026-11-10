@@ -7,6 +7,7 @@ import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from pydantic import BaseModel, create_model
 
+from techdebate.analyst import _decision_schema  # pyright: ignore[reportPrivateUsage]
 from techdebate.config import ModelPrice, Settings
 from techdebate.errors import LLMError
 from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, Message, ModelTier, Usage
@@ -147,6 +148,32 @@ async def test_per_call_literal_schema(reply_to: Any, sent_schema: dict[str, Any
     assert {k: v for k, v in sent_reply_to.items() if k != "title"} == sent_schema
     assert isinstance(response.parsed, schema)
     assert response.parsed.model_dump() == {"reply_to": value, "reason": "r"}
+
+
+@pytest.mark.parametrize("places", [[0], [0, 3, 5]])
+async def test_per_call_list_of_places_stays_strict(places: list[int]) -> None:
+    # A plain list[Literal[0]] would send {"const": 0}, which the transform moves into the description, so the
+    # decision schema gives its items an enum.
+    schema = _decision_schema(places)
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return httpx2.Response(200, json=_message(json.dumps({"reply_to": places, "reason": "r"})))
+
+    response = await _llm(handler).generate(_request(schema=schema))
+
+    sent_reply_to = sent[0]["output_config"]["format"]["schema"]["properties"]["reply_to"]
+    assert sent_reply_to["type"] == "array"
+    assert sent_reply_to["items"] == {"type": "integer", "enum": places}
+    assert isinstance(response.parsed, schema)
+    assert response.parsed.model_dump() == {"reply_to": places, "reason": "r"}
+
+
+async def test_per_call_list_of_places_refuses_a_place_not_offered() -> None:
+    llm = _llm(_reply(_message('{"reply_to": [1], "reason": "r"}')))
+    with pytest.raises(LLMError, match="SpeakDecision"):
+        await llm.generate(_request(schema=_decision_schema([0])))
 
 
 async def test_per_call_literal_out_of_range_raises() -> None:

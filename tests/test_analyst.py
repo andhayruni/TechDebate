@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -12,7 +13,7 @@ from techdebate.analyst import Analyst, ToolResult
 from techdebate.config import Settings
 from techdebate.errors import LLMError, NotFoundError, PromptError, ToolError
 from techdebate.llm import FakeLLM, LLMClient, ModelTier
-from techdebate.models import Evidence, SpeakDecision
+from techdebate.models import Evidence, ResearchPlan, SpeakDecision
 from techdebate.roles import ROLE_SPECS, RoleSpec
 from techdebate.tools import ToolInput, ToolRegistry, default_tools, make_http_client
 
@@ -89,32 +90,32 @@ def test_a_bad_prompt_id_fails_when_the_analyst_is_created() -> None:
         Analyst(role, FakeLLM(), ToolRegistry(), _settings())
 
 
-# decide
+# plan: the research call
 
 
-def _decides(decision: SpeakDecision) -> FakeLLM:
-    return FakeLLM(rules=[(lambda _: True, decision)])
+def _plans(plan: ResearchPlan) -> FakeLLM:
+    return FakeLLM(rules=[(lambda _: True, plan)])
 
 
-_SPEAK = SpeakDecision(speak=True, reply_to=None, reason="In my area.")
-_PASS = SpeakDecision(speak=False, reply_to=None, reason="Not my area.")
+_RESEARCH = ResearchPlan(speak=True, reason="In my area.")
+_SKIP = ResearchPlan(speak=False, reason="Not my area.")
 
 
-async def test_decide_builds_the_request_from_the_role_and_the_settings() -> None:
-    llm = _decides(_SPEAK)
+async def test_plan_builds_the_request_from_the_role_and_the_settings() -> None:
+    llm = _plans(_RESEARCH)
 
-    await _analyst(llm=llm, decide_max_tokens=321).decide("Rust")
+    await _analyst(llm=llm, decide_max_tokens=321).plan("Rust")
 
     [request] = llm.calls
     assert request.tier is ModelTier.CHEAP
     assert request.max_tokens == 321
-    assert request.prompt_id == "decide.v1"
+    assert request.prompt_id == "research.v1"
 
 
-async def test_decide_keeps_the_topic_out_of_the_system_prompt() -> None:
-    llm = _decides(_PASS)
+async def test_plan_keeps_the_post_out_of_the_system_prompt() -> None:
+    llm = _plans(_SKIP)
 
-    await _analyst(llm=llm).decide("Rust")
+    await _analyst(llm=llm).plan("Rust")
 
     [request] = llm.calls
     assert "You are the Developer" in request.system
@@ -122,32 +123,32 @@ async def test_decide_keeps_the_topic_out_of_the_system_prompt() -> None:
     assert "Rust" not in request.system
     [message] = request.messages
     assert message.role == "user"
-    assert message.content == "Topic: Rust"
+    assert message.content == "Post: Rust"
 
 
-async def test_decide_tells_the_role_about_its_tools_and_the_cap() -> None:
-    llm = _decides(_PASS.model_copy(update={"queries": {"a": []}}))
+async def test_plan_tells_the_role_about_its_tools_and_the_cap() -> None:
+    llm = _plans(_SKIP.model_copy(update={"queries": {"a": []}}))
 
-    await _analyst(_finds("a"), llm=llm, max_queries_per_tool=4).decide("Rust")
+    await _analyst(_finds("a"), llm=llm, max_queries_per_tool=4).plan("Rust")
 
     system = llm.calls[0].system
     assert "- a: Finds things. Its query is: A search query." in system
     assert "up to 4 queries" in system
 
 
-async def test_decide_returns_the_decision_with_its_queries_per_tool() -> None:
-    decision = _SPEAK.model_copy(update={"queries": {"a": ["x", "y"], "b": []}})
+async def test_plan_returns_the_plan_with_its_queries_per_tool() -> None:
+    plan = _RESEARCH.model_copy(update={"queries": {"a": ["x", "y"], "b": []}})
 
-    result = await _analyst(_finds("a"), _finds("b"), llm=_decides(decision)).decide("Rust")
+    result = await _analyst(_finds("a"), _finds("b"), llm=_plans(plan)).plan("Rust")
 
-    assert result == decision
-    assert type(result) is SpeakDecision
+    assert result == plan
+    assert type(result) is ResearchPlan
 
 
-async def test_the_schema_asks_for_every_tool_and_survives_the_provider_transform() -> None:
-    llm = _decides(_SPEAK.model_copy(update={"queries": {"a": [], "b": []}}))
+async def test_the_plan_schema_asks_for_every_tool_and_survives_the_provider_transform() -> None:
+    llm = _plans(_RESEARCH.model_copy(update={"queries": {"a": [], "b": []}}))
 
-    await _analyst(_finds("a"), _finds("b"), llm=llm).decide("Rust")
+    await _analyst(_finds("a"), _finds("b"), llm=llm).plan("Rust")
 
     schema = llm.calls[0].output_schema
     assert schema is not None
@@ -155,7 +156,7 @@ async def test_the_schema_asks_for_every_tool_and_survives_the_provider_transfor
     queries = sent["$defs"]["ToolQueries"]
     assert queries["required"] == ["a", "b"]
     assert queries["additionalProperties"] is False
-    assert set(sent["required"]) == {"speak", "reply_to", "queries", "reason"}
+    assert set(sent["required"]) == {"speak", "queries", "reason"}
 
 
 @pytest.mark.parametrize(
@@ -165,24 +166,96 @@ async def test_the_schema_asks_for_every_tool_and_survives_the_provider_transfor
         {"a": ["x"], "b": [], "c": []},  # not one of the role's tools
     ],
 )
-async def test_decide_raises_when_the_queries_do_not_match_the_tools(queries: dict[str, list[str]]) -> None:
-    llm = _decides(_SPEAK.model_copy(update={"queries": queries}))
+async def test_plan_raises_when_the_queries_do_not_match_the_tools(queries: dict[str, list[str]]) -> None:
+    llm = _plans(_RESEARCH.model_copy(update={"queries": queries}))
 
-    with pytest.raises(LLMError, match="SpeakDecision"):
-        await _analyst(_finds("a"), _finds("b"), llm=llm).decide("Rust")
+    with pytest.raises(LLMError, match="ResearchPlan"):
+        await _analyst(_finds("a"), _finds("b"), llm=llm).plan("Rust")
 
 
-async def test_decide_makes_no_tool_call() -> None:
+async def test_plan_makes_no_tool_call() -> None:
     tool = _fails("a", KeyError("must not be called"))
-    llm = _decides(_SPEAK.model_copy(update={"queries": {"a": ["x"]}}))
+    llm = _plans(_RESEARCH.model_copy(update={"queries": {"a": ["x"]}}))
 
-    await _analyst(tool, llm=llm).decide("Rust")
+    await _analyst(tool, llm=llm).plan("Rust")
 
 
-async def test_decide_raises_when_the_reply_does_not_fit_the_schema() -> None:
-    reply = '{"speak": true, "reply_to": 1, "queries": {}, "reason": "No turn 1 exists."}'
+async def test_plan_raises_when_the_reply_does_not_fit_the_schema() -> None:
+    reply = '{"speak": "maybe", "queries": {}, "reason": "Unsure."}'
+    with pytest.raises(LLMError, match="ResearchPlan"):
+        await _analyst(llm=_replies(reply)).plan("Rust")
+
+
+# decide: after the research
+
+
+def _decides(decision: SpeakDecision | str) -> FakeLLM:
+    return FakeLLM(rules=[(lambda _: True, decision)])
+
+
+_COMMENT = SpeakDecision(reply_to=[0], reason="The data is new.")
+_PASS = SpeakDecision(reply_to=[], reason="Nothing new.")
+
+
+async def test_decide_builds_the_request_from_the_role_and_the_settings() -> None:
+    llm = _decides(_COMMENT)
+
+    await _analyst(llm=llm, decide_max_tokens=321).decide("Rust", [])
+
+    [request] = llm.calls
+    assert request.tier is ModelTier.CHEAP
+    assert request.max_tokens == 321
+    assert request.prompt_id == "decide.v1"
+
+
+async def test_decide_keeps_the_post_and_the_report_out_of_the_system_prompt() -> None:
+    llm = _decides(_PASS)
+
+    await _analyst(llm=llm).decide("Rust", [_found("a"), ToolResult(tool="b", query=None)])
+
+    [request] = llm.calls
+    assert "You are the Developer" in request.system
+    assert "Are developers using it?" in request.system
+    assert "Rust" not in request.system
+    assert "example.com" not in request.system
+    [message] = request.messages
+    assert message.role == "user"
+    assert message.content == (
+        'Post: Rust\n\nTool results:\n\na, query "q":\n[1] a\n    a summary\n    https://example.com/a\n\nb: not used'
+    )
+
+
+@pytest.mark.parametrize("decision", [_COMMENT, _PASS])
+async def test_decide_returns_the_decision(decision: SpeakDecision) -> None:
+    result = await _analyst(llm=_decides(decision)).decide("Rust", [])
+
+    assert result == decision
+    assert type(result) is SpeakDecision
+
+
+async def test_decide_offers_the_post_as_the_only_place_and_survives_the_provider_transform() -> None:
+    llm = _decides(_COMMENT)
+
+    await _analyst(llm=llm).decide("Rust", [])
+
+    schema = llm.calls[0].output_schema
+    assert schema is not None
+    sent = anthropic.transform_schema(schema.model_json_schema())
+    assert sent["properties"]["reply_to"]["items"] == {"type": "integer", "enum": [0]}
+    assert set(sent["required"]) == {"reply_to", "reason"}
+
+
+@pytest.mark.parametrize("reply_to", [[1], [0, 1], None])
+async def test_decide_refuses_a_place_that_is_not_offered(reply_to: list[int] | None) -> None:
+    reply = json.dumps({"reply_to": reply_to, "reason": "No comment 1 exists."})
     with pytest.raises(LLMError, match="SpeakDecision"):
-        await _analyst(llm=_replies(reply)).decide("Rust")
+        await _analyst(llm=_replies(reply)).decide("Rust", [])
+
+
+async def test_decide_keeps_a_place_named_twice_once() -> None:
+    result = await _analyst(llm=_replies('{"reply_to": [0, 0], "reason": "Twice."}')).decide("Rust", [])
+
+    assert result.reply_to == [0]
 
 
 def test_a_role_with_a_missing_tool_fails_when_the_analyst_is_created() -> None:

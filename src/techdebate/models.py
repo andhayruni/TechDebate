@@ -29,12 +29,19 @@ class Evidence(BaseModel):
     fetched_at: datetime = Field(default_factory=_now)
 
 
-class SpeakDecision(BaseModel):
-    """A role's choice to speak or pass. The model fills this in, so every field is part of the schema it sees."""
+class ResearchPlan(BaseModel):
+    """An agent's first look at a post: whether it is in the agent's area, and what to search for. The model fills this
+    in, so every field is part of the schema it sees."""
 
     speak: bool
-    reply_to: None  # there are no comments to reply to yet
     queries: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])  # per tool; empty: the tool doesn't fit
+    reason: str
+
+
+class SpeakDecision(BaseModel):
+    """Where an agent comments, after its research. The model fills this in from choices built for each call."""
+
+    reply_to: list[int]  # the places to comment: 0 is the post itself. Empty: a pass
     reason: str
 
 

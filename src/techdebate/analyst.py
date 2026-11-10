@@ -1,25 +1,30 @@
-"""An analyst does an agent's work: it decides whether to comment and what to search for, gathers evidence and writes
-the comment."""
+"""An analyst does an agent's work on a post: it plans its research, gathers evidence, decides whether to comment, and
+writes the comment."""
 
 import asyncio
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from types import GenericAlias
+from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, ConfigDict, WithJsonSchema, create_model
 
 from techdebate.config import Settings
 from techdebate.errors import LLMError, NotFoundError, ToolError
 from techdebate.llm import LLMClient, LLMRequest, Message, ModelTier
-from techdebate.models import Evidence, SpeakDecision
+from techdebate.models import Evidence, ResearchPlan, SpeakDecision
 from techdebate.prompts import load_prompt_by_id
 from techdebate.roles import RoleSpec
 from techdebate.tools import ToolRegistry, format_evidence
 
 log = logging.getLogger(__name__)
 
-_DECIDE_PROMPT_ID = "decide.v1"  # shared by every role
+# Shared by every role.
+_RESEARCH_PROMPT_ID = "research.v1"
+_DECIDE_PROMPT_ID = "decide.v1"
+
+_POST = 0  # the place for a top-level comment: the post itself
 
 
 @dataclass(frozen=True)
@@ -32,11 +37,20 @@ class ToolResult:
     failed: bool = False
 
 
-def _decision_schema(tool_names: Iterable[str]) -> type[SpeakDecision]:
+def _plan_schema(tool_names: Iterable[str]) -> type[ResearchPlan]:
     """The schema the model fills in: every one of the role's tools gets a list of queries, and no other tool does."""
     tool_fields: dict[str, Any] = {name: (list[str], ...) for name in tool_names}
     queries = create_model("ToolQueries", __config__=ConfigDict(extra="forbid"), **tool_fields)
-    return create_model("SpeakDecision", __base__=SpeakDecision, queries=(queries, ...))
+    return create_model("ResearchPlan", __base__=ResearchPlan, queries=(queries, ...))
+
+
+def _decision_schema(places: Sequence[int]) -> type[SpeakDecision]:
+    """The schema the model fills in: reply_to can name only the places given, so a closed place can't be picked."""
+    # An enum, not the const pydantic gives a one-value Literal: the provider's transform moves a const into the
+    # description, and the model would no longer be held to it.
+    place = Annotated[cast("Any", Literal)[tuple(places)], WithJsonSchema({"type": "integer", "enum": list(places)})]
+    fields: dict[str, Any] = {"reply_to": (GenericAlias(list, place), ...)}  # list[Literal[*places]]
+    return create_model("SpeakDecision", __base__=SpeakDecision, **fields)
 
 
 class Analyst:
@@ -49,27 +63,44 @@ class Analyst:
         self._max_queries_per_tool = settings.max_queries_per_tool
         # Loaded here, so a bad ID fails before any tool or LLM call.
         self._write_prompt = load_prompt_by_id(role.prompt_id)
+        self._research_prompt = load_prompt_by_id(_RESEARCH_PROMPT_ID)
         self._decide_prompt = load_prompt_by_id(_DECIDE_PROMPT_ID)
-        self._decision_schema = _decision_schema(role.tool_names)
+        self._plan_schema = _plan_schema(role.tool_names)
         self._tool_descriptions = [self._describe_tool(name) for name in role.tool_names]
 
-    async def decide(self, topic: str) -> SpeakDecision:
+    async def plan(self, post: str) -> ResearchPlan:
+        """The first look at a post: whether to research it, and the queries for each tool."""
         request = LLMRequest(
             tier=ModelTier.CHEAP,
-            system=self._decide_prompt.render(
+            system=self._research_prompt.render(
                 display_name=self._role.display_name,
                 question=self._role.question,
                 tools=self._tool_descriptions,
                 max_queries_per_tool=self._max_queries_per_tool,
             ),
-            messages=[Message(role="user", content=f"Topic: {topic}")],
-            output_schema=self._decision_schema,
+            messages=[Message(role="user", content=f"Post: {post}")],
+            output_schema=self._plan_schema,
+            max_tokens=self._decide_max_tokens,
+            prompt_id=self._research_prompt.id,
+        )
+        response = await self._llm.generate(request)
+        # A client returns output_schema's type, or raises. Its nested queries become the plain mapping.
+        return ResearchPlan.model_validate(cast("BaseModel", response.parsed).model_dump())
+
+    async def decide(self, post: str, results: list[ToolResult]) -> SpeakDecision:
+        """Where to comment, after the research. An empty reply_to is a pass."""
+        request = LLMRequest(
+            tier=ModelTier.CHEAP,
+            system=self._decide_prompt.render(display_name=self._role.display_name, question=self._role.question),
+            messages=[Message(role="user", content=_user_message("Post", post, results))],
+            output_schema=_decision_schema([_POST]),  # built for each call: 5.4 adds the comments as places
             max_tokens=self._decide_max_tokens,
             prompt_id=self._decide_prompt.id,
         )
         response = await self._llm.generate(request)
-        # A client returns output_schema's type, or raises. Its nested queries become the plain mapping.
-        return SpeakDecision.model_validate(cast("BaseModel", response.parsed).model_dump())
+        decision = SpeakDecision.model_validate(cast("BaseModel", response.parsed).model_dump())
+        # A place named twice is kept once: the API doesn't enforce unique items.
+        return decision.model_copy(update={"reply_to": list(dict.fromkeys(decision.reply_to))})
 
     async def gather(self, queries: Mapping[str, list[str]]) -> list[ToolResult]:
         """One result per query, in the role's tool order, and one for each tool with no queries. It never raises for
@@ -85,7 +116,7 @@ class Analyst:
         request = LLMRequest(
             tier=ModelTier.STRONG,
             system=self._write_prompt.render(display_name=self._role.display_name, question=self._role.question),
-            messages=[Message(role="user", content=_user_message(topic, results))],
+            messages=[Message(role="user", content=_user_message("Topic", topic, results))],
             max_tokens=self._write_max_tokens,
             prompt_id=self._write_prompt.id,
         )
@@ -135,5 +166,6 @@ def _report(result: ToolResult) -> str:
     return f"{heading}:\n{format_evidence(result.evidence)}"
 
 
-def _user_message(topic: str, results: list[ToolResult]) -> str:
-    return f"Topic: {topic}\n\nTool results:\n\n" + "\n\n".join(_report(result) for result in results)
+def _user_message(label: str, text: str, results: list[ToolResult]) -> str:
+    """The post (under `label`, until every call says Post) and one report entry per query."""
+    return f"{label}: {text}\n\nTool results:\n\n" + "\n\n".join(_report(result) for result in results)

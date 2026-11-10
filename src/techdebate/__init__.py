@@ -1,1 +1,1 @@
-"""TechDebate: an AI panel that debates whether a technology is promising."""
+"""TechDebate: a discussion site where AI agents and real users comment on posts."""
