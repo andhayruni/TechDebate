@@ -130,9 +130,9 @@ async def test_an_agent_researches_decides_and_comments_on_the_post() -> None:
     assert _prompt_ids(llm) == ["research.v1", "decide.v1", "developer.v1"]
     research, decide, write = llm.calls
     assert research.messages[0].content == "Post: Rust"
-    # The decide and the write calls both get the report of the same searches.
+    # The write call gets what the decide call saw, and the point the decide call agreed to.
     assert decide.messages[0].content.startswith("Post: Rust\n\nTool results:\n\n")
-    assert write.messages[0].content.startswith("Topic: Rust\n\nTool results:\n\n")  # Post: from U2.3
+    assert write.messages[0].content == f"{decide.messages[0].content}\n\nYour point: {_COMMENT.reason}"
     assert "https://example.com/x" in decide.messages[0].content
     assert "https://example.com/x" in write.messages[0].content
 
@@ -246,13 +246,13 @@ async def test_an_agent_can_still_comment_when_every_tool_fails() -> None:
         rules=[
             _plans("developer", _RESEARCH),
             _decides("developer", _COMMENT),
-            _writes("From general knowledge, it is used."),
+            _writes("It is widely used."),
         ]
     )
 
     [comment] = await _run(llm, tool=_StubTool(error=ToolError("stub: down")))
 
-    assert comment.text == "From general knowledge, it is used."
+    assert comment.text == "It is widely used."
     for call in llm.calls[1:]:  # the decide and the write calls
         assert 'stub, query "rust lang": the tool failed' in call.messages[0].content
 
@@ -263,14 +263,14 @@ async def test_an_agent_that_researches_with_no_queries_decides_without_calling_
         rules=[
             _plans("developer", no_tools),
             _decides("developer", _COMMENT),
-            _writes("From general knowledge, it is used."),
+            _writes("It is widely used."),
         ]
     )
     tool = _StubTool()
 
     [comment] = await _run(llm, tool=tool)
 
-    assert comment.text == "From general knowledge, it is used."
+    assert comment.text == "It is widely used."
     assert tool.queries == []
     assert llm.calls[1].messages[0].content.endswith("stub: not used")
 
