@@ -361,13 +361,13 @@ def test_run_command_still_prints_a_comment_when_every_tool_fails(
 ) -> None:
     _use_settings(monkeypatch)
     _use_developer_tools(monkeypatch, ToolError("github is down"))
-    llm = FakeLLM(rules=[*_COMMENTS, (_is_write, "From general knowledge, it is used.")])
+    llm = FakeLLM(rules=[*_COMMENTS, (_is_write, "It is widely used.")])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "Rust"])
 
     out, err = capsys.readouterr()
-    assert out == "me:\nRust\n\n  Developer [AI]:\n  From general knowledge, it is used.\n"
+    assert out == "me:\nRust\n\n  Developer [AI]:\n  It is widely used.\n"
     assert err.count("tool failed") == 3  # each failed tool still logs its warning
     assert err.splitlines()[-1] == "comments=1 cost=$0.000000"
 

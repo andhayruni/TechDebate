@@ -52,9 +52,9 @@ def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
     research, decide, write = llm.calls
     assert (research.prompt_id, decide.prompt_id, write.prompt_id) == ("research.v1", "decide.v1", "developer.v1")
     assert research.messages[0].content == "Post: httpx"
-    # The decide and the write calls get the same report, under their own label until U2.3.
+    # The write call gets what the decide call saw, and the point the decide call agreed to.
     report = decide.messages[0].content.removeprefix("Post: httpx")
-    assert write.messages[0].content == f"Topic: httpx{report}"
+    assert write.messages[0].content == f"Post: httpx{report}\n\nYour point: {_COMMENT_ON_POST.reason}"
     assert report.startswith('\n\nTool results:\n\ngithub_search, query "httpx":\n')
     for url in (
         "https://github.com/search?q=httpx&type=repositories",  # github_search
@@ -119,7 +119,7 @@ def test_a_comment_is_still_written_when_every_source_is_down(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], respx_mock: respx.MockRouter
 ) -> None:
     respx_mock.route().respond(500)
-    text = "From general knowledge, it is used, though my searches failed."
+    text = "It is widely used, though my searches failed."
     llm = FakeLLM(rules=[(_is_research, _RESEARCH), (_is_decide, _COMMENT_ON_POST), (_is_write, text)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 

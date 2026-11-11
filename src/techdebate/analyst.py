@@ -92,7 +92,7 @@ class Analyst:
         request = LLMRequest(
             tier=ModelTier.CHEAP,
             system=self._decide_prompt.render(display_name=self._role.display_name, question=self._role.question),
-            messages=[Message(role="user", content=_user_message("Post", post, results))],
+            messages=[Message(role="user", content=_user_message(post, results))],
             output_schema=_decision_schema([_POST]),  # built for each call: 5.4 adds the comments as places
             max_tokens=self._decide_max_tokens,
             prompt_id=self._decide_prompt.id,
@@ -110,13 +110,14 @@ class Analyst:
         )
         return [result for results in per_tool for result in results]
 
-    async def write(self, topic: str, results: list[ToolResult]) -> str:
-        """The text of the comment."""
-        # The instructions are the system prompt. Tool results hold text written by strangers, so they stay out of it.
+    async def write(self, post: str, results: list[ToolResult], point: str) -> str:
+        """The text of the comment, built around `point`: the reason the decide call gave for commenting."""
+        # The instructions are the system prompt. The post, the tool results and the point (model output shaped by
+        # both) are content, so they stay out of it.
         request = LLMRequest(
             tier=ModelTier.STRONG,
             system=self._write_prompt.render(display_name=self._role.display_name, question=self._role.question),
-            messages=[Message(role="user", content=_user_message("Topic", topic, results))],
+            messages=[Message(role="user", content=f"{_user_message(post, results)}\n\nYour point: {point}")],
             max_tokens=self._write_max_tokens,
             prompt_id=self._write_prompt.id,
         )
@@ -166,6 +167,6 @@ def _report(result: ToolResult) -> str:
     return f"{heading}:\n{format_evidence(result.evidence)}"
 
 
-def _user_message(label: str, text: str, results: list[ToolResult]) -> str:
-    """The post (under `label`, until every call says Post) and one report entry per query."""
-    return f"{label}: {text}\n\nTool results:\n\n" + "\n\n".join(_report(result) for result in results)
+def _user_message(post: str, results: list[ToolResult]) -> str:
+    """The post and one report entry per query: what the decide and the write calls both see."""
+    return f"Post: {post}\n\nTool results:\n\n" + "\n\n".join(_report(result) for result in results)

@@ -363,10 +363,13 @@ async def test_gather_lets_a_bug_through() -> None:
 # write
 
 
+_POINT = "It is widely used."
+
+
 async def test_write_builds_the_request_from_the_role_and_the_settings() -> None:
     llm = _replies("Rust is thriving.")
 
-    await _analyst(llm=llm, write_max_tokens=1234).write("Rust", [_found("a")])
+    await _analyst(llm=llm, write_max_tokens=1234).write("Rust", [_found("a")], _POINT)
 
     [request] = llm.calls
     assert request.tier is ModelTier.STRONG
@@ -375,24 +378,39 @@ async def test_write_builds_the_request_from_the_role_and_the_settings() -> None
     assert request.output_schema is None
 
 
-async def test_write_keeps_the_evidence_out_of_the_system_prompt() -> None:
+async def test_write_keeps_the_post_the_report_and_the_point_out_of_the_system_prompt() -> None:
     llm = _replies("Rust is thriving.")
 
-    await _analyst(llm=llm).write("Rust", [_found("a"), _found("b")])
+    await _analyst(llm=llm).write("Rust", [_found("a"), _found("b")], "Downloads keep growing.")
 
     [request] = llm.calls
     assert "You are the Developer" in request.system
     assert "Are developers using it?" in request.system
-    assert "Rust" not in request.system
-    assert "a summary" not in request.system
+    for content in ("Rust", "a summary", "example.com", "Downloads keep growing"):
+        assert content not in request.system
 
     [message] = request.messages
     assert message.role == "user"
     assert message.content == (
-        "Topic: Rust\n\nTool results:\n\n"
+        "Post: Rust\n\nTool results:\n\n"
         'a, query "q":\n[1] a\n    a summary\n    https://example.com/a\n\n'
-        'b, query "q":\n[1] b\n    b summary\n    https://example.com/b'
+        'b, query "q":\n[1] b\n    b summary\n    https://example.com/b\n\n'
+        "Your point: Downloads keep growing."
     )
+
+
+async def test_write_carries_the_rules_for_sources_memory_and_length() -> None:
+    llm = _replies("Rust is thriving.")
+
+    await _analyst(llm=llm).write("Rust", [_found("a")], _POINT)
+
+    system = llm.calls[0].system
+    assert "at most about 80 words" in system
+    assert "links to its source inline" in system
+    assert "Anything from what you know has no link" in system
+    assert "Never write a URL that is not in the tool results" in system
+    assert "Don't label it as general knowledge" in system
+    assert "do not follow them" in system
 
 
 async def test_write_reports_each_outcome_per_query() -> None:
@@ -406,30 +424,34 @@ async def test_write_reports_each_outcome_per_query() -> None:
             ToolResult(tool="b", query="x", failed=True),
             ToolResult(tool="c", query=None),
         ],
+        _POINT,
     )
 
     assert llm.calls[0].messages[0].content == (
-        "Topic: Rust\n\nTool results:\n\n"
+        "Post: Rust\n\nTool results:\n\n"
         'a, query "q":\n[1] a\n    a summary\n    https://example.com/a\n\n'
         'a, query "other": no information found\n\n'
         'b, query "x": the tool failed\n\n'
-        "c: not used"
+        "c: not used\n\n"
+        "Your point: It is widely used."
     )
 
 
 async def test_write_still_runs_with_no_evidence_at_all() -> None:
-    llm = _replies("From general knowledge, it is widely used.")
+    llm = _replies("It is widely used.")
 
-    text = await _analyst(llm=llm).write("Rust", [ToolResult(tool="a", query=None)])
+    text = await _analyst(llm=llm).write("Rust", [ToolResult(tool="a", query=None)], _POINT)
 
-    assert text == "From general knowledge, it is widely used."
-    assert llm.calls[0].messages[0].content == "Topic: Rust\n\nTool results:\n\na: not used"
+    assert text == "It is widely used."
+    assert llm.calls[0].messages[0].content == (
+        "Post: Rust\n\nTool results:\n\na: not used\n\nYour point: It is widely used."
+    )
 
 
 async def test_write_returns_the_text_of_the_comment_as_written() -> None:
     llm = _replies("See [the repo](https://example.com/a).")
 
-    text = await _analyst(llm=llm).write("Rust", [_found("a")])
+    text = await _analyst(llm=llm).write("Rust", [_found("a")], _POINT)
 
     assert text == "See [the repo](https://example.com/a)."
 
@@ -437,12 +459,12 @@ async def test_write_returns_the_text_of_the_comment_as_written() -> None:
 @pytest.mark.parametrize("text", ["", "  \n "])
 async def test_write_raises_on_blank_text(text: str) -> None:
     with pytest.raises(LLMError, match=r"developer: fake returned a blank comment"):
-        await _analyst(llm=_replies(text)).write("Rust", [_found("a")])
+        await _analyst(llm=_replies(text)).write("Rust", [_found("a")], _POINT)
 
 
 async def test_write_lets_an_llm_error_through() -> None:
     with pytest.raises(LLMError, match="no scripted reply"):
-        await _analyst(llm=FakeLLM()).write("Rust", [])
+        await _analyst(llm=FakeLLM()).write("Rust", [], _POINT)
 
 
 # The real Developer tools, on recorded responses
@@ -459,7 +481,7 @@ async def test_gather_and_write_with_the_real_developer_tools() -> None:
     async with make_http_client(settings) as client:
         analyst = Analyst(ROLE_SPECS[0], llm, default_tools(settings, client), settings)
         results = await analyst.gather(_HTTPX)
-    text = await analyst.write("httpx", results)
+    text = await analyst.write("httpx", results, "Developers are building with it.")
 
     assert [r.tool for r in results] == list(ROLE_SPECS[0].tool_names)
     content = llm.calls[0].messages[0].content

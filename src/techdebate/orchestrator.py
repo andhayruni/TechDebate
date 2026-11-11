@@ -44,7 +44,7 @@ async def check_post(
             decision.reason,
         )
         for _place in decision.reply_to:  # only the post itself, 0, until 5.4
-            text = await analyst.write(post.text, results)
+            text = await analyst.write(post.text, results, decision.reason)
             comments.append(Message(post_id=post.id, parent_id=post.id, author_id=agents[role.name].id, text=text))
 
     return comments
