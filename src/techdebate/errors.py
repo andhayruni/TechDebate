@@ -21,5 +21,10 @@ class PromptError(TechDebateError):
     """A prompt file is unknown, invalid or missing a variable."""
 
 
+class StoreError(TechDebateError):
+    """The database refused a write that a user can cause (a username already taken), or is at a version this code
+    does not know."""
+
+
 class BudgetExceeded(TechDebateError):
     """A spending cap was reached."""
