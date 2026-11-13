@@ -340,6 +340,24 @@ def test_run_command_prints_the_cost_of_every_call(
     assert capsys.readouterr().err == "comments=1 cost=$0.270000\n"  # research, decide and write
 
 
+def test_run_command_refuses_a_username_that_breaks_the_rule(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_settings(monkeypatch, username="Andok")
+    _use_developer_tools(monkeypatch)
+    llm = FakeLLM()
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "Rust"])
+
+    assert exc.value.code == 1
+    assert capsys.readouterr() == (
+        "",
+        "error: username 'Andok' is invalid: use 1 to 30 lowercase letters, digits or underscores\n",
+    )
+    assert llm.calls == []
+
+
 def test_format_post_indents_each_comment_and_labels_only_agents() -> None:
     me = User(username="me", kind=UserKind.REAL)
     developer = User(username="developer", kind=UserKind.AGENT)

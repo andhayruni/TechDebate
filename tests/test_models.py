@@ -56,6 +56,13 @@ def test_a_notification_needs_both_closed_at_and_outcome_or_neither(
         )
 
 
+@pytest.mark.parametrize("username", ["", "Developer", "dev-eloper", "me\n", "a" * 31])
+@pytest.mark.parametrize("kind", list(UserKind))
+def test_a_user_cannot_be_built_with_a_name_that_breaks_the_rule(username: str, kind: UserKind) -> None:
+    with pytest.raises(ValidationError, match="username"):
+        User(username=username, kind=kind)
+
+
 def test_users_and_messages_round_trip() -> None:
     user = User(username="developer", kind=UserKind.AGENT)
     message = Message(post_id="p", parent_id="p", author_id=user.id, text="Yes.")

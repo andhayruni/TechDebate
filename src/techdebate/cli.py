@@ -18,8 +18,9 @@ from techdebate.logging_setup import setup_logging
 from techdebate.models import Evidence, Message, User, UserKind
 from techdebate.orchestrator import check_post
 from techdebate.prompts import load_prompt
-from techdebate.roles import default_roles, display_name
+from techdebate.roles import default_roles
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
+from techdebate.users import check_username, shown_name
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ async def _evidence_command(tool_name: str, query: str) -> list[Evidence]:
 async def _run_command(text: str, meter: CostMeter) -> tuple[Message, list[Message], dict[str, User]]:
     """The post, its comments, and every user by ID. The users exist only in memory for now."""
     settings = get_settings()
-    me = User(username=settings.username, kind=UserKind.REAL)
+    me = User(username=check_username(settings.username), kind=UserKind.REAL)
     post = Message(author_id=me.id, text=text)
     async with make_http_client(settings) as client:
         tools = default_tools(settings, client)
@@ -68,16 +69,9 @@ async def _run_command(text: str, meter: CostMeter) -> tuple[Message, list[Messa
     return post, comments, users
 
 
-def _shown_name(user: User) -> str:
-    """An agent's name always carries the AI label."""
-    if user.kind is UserKind.AGENT:
-        return f"{display_name(user.username)} [AI]"
-    return user.username
-
-
 def _format_post(post: Message, comments: list[Message], users: dict[str, User]) -> str:
     def block(message: Message) -> str:
-        return f"{_shown_name(users[message.author_id])}:\n{message.text}"
+        return f"{shown_name(users[message.author_id])}:\n{message.text}"
 
     below = "\n\n".join(block(comment) for comment in comments) if comments else "No comments."
     return f"{block(post)}\n\n{textwrap.indent(below, '  ')}"

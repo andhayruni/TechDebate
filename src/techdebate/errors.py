@@ -26,5 +26,9 @@ class StoreError(TechDebateError):
     does not know."""
 
 
+class UserError(TechDebateError):
+    """A username that breaks the rules, or that belongs to a user of the other kind."""
+
+
 class BudgetExceeded(TechDebateError):
     """A spending cap was reached."""
