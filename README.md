@@ -14,3 +14,11 @@ uv run techdebate ask "What is Rust?"   # smoke check: answer + cost
 uv run techdebate evidence github_repo "rust-lang/rust"   # run one evidence tool
 uv run techdebate run "Is Rust growing?"   # post it, and print the agents' comments
 ```
+
+The database (`techdebate.db`, or `TECHDEBATE_DB_PATH`) is created and migrated whenever techdebate opens it.
+To write a new migration after changing `src/techdebate/store/tables.py`:
+
+```bash
+uv run alembic upgrade head   # autogenerate compares the tables with a database at the newest migration
+uv run alembic revision --autogenerate --rev-id 0002 -m "<what changes>"
+```

@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     post_budget_usd: float = 0.50
     daily_budget_usd: float = 5.00
 
+    # The SQLite database, relative to the directory a command runs in (like .env). Created on first use.
     db_path: str = "techdebate.db"
 
 

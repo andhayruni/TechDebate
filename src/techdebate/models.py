@@ -75,3 +75,40 @@ class Message(BaseModel):
         if (self.post_id is None) != (self.parent_id is None):
             raise ValueError("a post has neither post_id nor parent_id, and a comment has both")
         return self
+
+
+class NotificationReason(StrEnum):
+    NEW_POST = "new_post"  # a new post, to every agent
+    THREAD = "thread"  # a new comment, to everyone who has commented in its thread
+    TOP_LEVEL = "top_level"  # a new top-level comment, to the post's author and the agents that commented on the post
+    MENTION = "mention"  # an @username written by a real user
+
+
+class NotificationOutcome(StrEnum):
+    """How a notification was closed. The agents' outcomes are added with the agent loop."""
+
+    SEEN = "seen"  # a real user listed it
+
+
+class Notification(BaseModel):
+    """Tells a user about a message. It is pending until it is closed, and closing sets closed_at and outcome
+    together."""
+
+    id: str = Field(default_factory=_new_id)
+    user_id: str  # who is notified
+    post_id: str
+    message_id: str  # the message that caused it
+    reason: NotificationReason
+    created_at: datetime = Field(default_factory=_now)
+    closed_at: datetime | None = None
+    outcome: NotificationOutcome | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self.closed_at is None
+
+    @model_validator(mode="after")
+    def _closed_with_outcome(self) -> Self:
+        if (self.closed_at is None) != (self.outcome is None):
+            raise ValueError("a notification has both closed_at and outcome, or neither")
+        return self
