@@ -1,15 +1,30 @@
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 import respx
 
+from techdebate.config import Settings
+from techdebate.store import Store, open_store
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 GITHUB = "api.github.com"
 PYPI = "pypi.org"
 STATS = "pypistats.org"
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    return tmp_path / "techdebate.db"
+
+
+@pytest.fixture
+async def store(db_path: Path) -> AsyncIterator[Store]:
+    """A real database in a temporary file, created and migrated as a command would."""
+    async with open_store(Settings(_env_file=None, db_path=str(db_path))) as store:  # pyright: ignore[reportCallIssue]
+        yield store
 
 
 @pytest.fixture

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import sqlite3
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,17 +21,6 @@ from techdebate.store.tables import Base
 
 def _settings(path: Path) -> Settings:
     return Settings(_env_file=None, db_path=str(path))  # pyright: ignore[reportCallIssue]
-
-
-@pytest.fixture
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "techdebate.db"
-
-
-@pytest.fixture
-async def store(db_path: Path) -> AsyncIterator[Store]:
-    async with open_store(_settings(db_path)) as store:
-        yield store
 
 
 @pytest.fixture

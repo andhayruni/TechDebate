@@ -50,11 +50,15 @@ class UserKind(StrEnum):
     REAL = "real"
 
 
+# Every username, of either kind: 1 to 30 lowercase letters, digits and underscores.
+USERNAME_PATTERN = r"^[a-z0-9_]{1,30}$"
+
+
 class User(BaseModel):
     """Anyone who writes: an AI agent or a real user. Both kinds share one set of usernames."""
 
     id: str = Field(default_factory=_new_id)
-    username: str  # an agent's username is its role's name
+    username: str = Field(pattern=USERNAME_PATTERN)  # an agent's username is its role's name
     kind: UserKind
     created_at: datetime = Field(default_factory=_now)
 
