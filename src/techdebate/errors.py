@@ -34,5 +34,10 @@ class ForumError(TechDebateError):
     """A write the forum refuses: a post by an agent, blank text, or a reply to a message that does not exist."""
 
 
+class CommandError(TechDebateError):
+    """A command used in a way the discussion does not allow: a second post, no post yet, or an unknown comment
+    number."""
+
+
 class BudgetExceeded(TechDebateError):
     """A spending cap was reached."""
