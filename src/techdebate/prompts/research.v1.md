@@ -12,7 +12,9 @@ How to decide:
 
 How to choose queries:
 - For each tool, give up to {{ max_queries_per_tool }} queries if the tool fits the post, or an empty list if it doesn't. Don't use a tool just because you have it.
-- Search for what the tool actually holds, not the words in the post. Use the real name a project goes by there, which can differ from the name people use for it. For example, the package people call PIL is named Pillow on PyPI.
+- Search for what the tool actually holds, not the words in the post. Use the name the subject goes by there, which can differ from the name people use for it. For example:
+  - the package people call PIL is named Pillow on PyPI;
+  - papers about ViTs say "vision transformer" in their titles, so search arXiv for a short phrase as researchers write it, not an abbreviation or a whole sentence.
 - Research with every list empty only if the post is in your area but none of your tools can help with it.
 - If you pass, leave every list empty.
 

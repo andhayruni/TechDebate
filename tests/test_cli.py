@@ -29,6 +29,7 @@ from techdebate.models import (
     UserKind,
 )
 from techdebate.prompts import load_prompt
+from techdebate.roles import ROLE_SPECS
 from techdebate.store import open_store
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 from techdebate.tree import Tree
@@ -281,15 +282,30 @@ def _is_write(request: LLMRequest) -> bool:
     return request.prompt_id == "developer.v1"
 
 
-def _use_developer_tools(monkeypatch: pytest.MonkeyPatch, error: ToolError | None = None) -> None:
-    """Stubs under the Developer's real tool names, so default_roles keeps the role. With an error, every tool fails."""
+def _passes_at_research(display_name: str, tool_names: tuple[str, ...]) -> tuple[Predicate, Reply]:
+    def matches(request: LLMRequest) -> bool:
+        return _is_research(request) and request.system.startswith(f"You are the {display_name},")
+
+    return matches, ResearchPlan(speak=False, queries={name: [] for name in tool_names}, reason="Not my area.")
+
+
+# The Scientist and the Pollster look at every post too. In these tests they pass, so the rules after them script the
+# Developer.
+_OTHERS_PASS: list[tuple[Predicate, Reply]] = [
+    _passes_at_research(role.display_name, role.tool_names) for role in ROLE_SPECS if role.name != "developer"
+]
+
+
+def _use_agent_tools(monkeypatch: pytest.MonkeyPatch, error: ToolError | None = None) -> None:
+    """Stubs under the real tool names of every role, so default_roles keeps them all. With an error, every tool
+    fails."""
 
     class _Failing(_StubTool):
         async def run(self, input: _StubInput) -> list[Evidence]:
             raise error or ToolError("unreachable")
 
     tools: list[Tool[Any]] = []
-    for name in ("github_search", "github_repo", "pypi"):
+    for name in dict.fromkeys(name for role in ROLE_SPECS for name in role.tool_names):
         tool = _Failing([]) if error else _StubTool([_item(name)])
         tool.name = name
         tools.append(tool)
@@ -311,9 +327,9 @@ def test_run_command_prints_the_post_and_the_comment_with_its_ai_label(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _use_settings(monkeypatch)
-    _use_developer_tools(monkeypatch)
+    _use_agent_tools(monkeypatch)
     text = "Developers use [it](https://example.com/github_search)."
-    llm = FakeLLM(rules=[*_COMMENTS, (_is_write, text)])
+    llm = FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, text)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "Rust"])
@@ -327,8 +343,8 @@ def test_run_command_says_so_when_nobody_comments(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _use_settings(monkeypatch, username="alice")
-    _use_developer_tools(monkeypatch)
-    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[(_is_research, _SKIP)]))
+    _use_agent_tools(monkeypatch)
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _SKIP)]))
 
     cli.main(["run", "Sourdough"])
 
@@ -346,19 +362,20 @@ def test_run_command_prints_the_cost_of_every_call(
             return response.model_copy(update={"cost_usd": 0.25 if _is_write(request) else 0.01})
 
     _use_settings(monkeypatch)
-    _use_developer_tools(monkeypatch)
-    monkeypatch.setattr(cli, "_make_llm", lambda: _Priced(rules=[*_COMMENTS, (_is_write, "Used.")]))
+    _use_agent_tools(monkeypatch)
+    monkeypatch.setattr(cli, "_make_llm", lambda: _Priced(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
 
     cli.main(["run", "Rust"])
 
-    assert capsys.readouterr().err == "comments=1 cost=$0.270000\n"  # research, decide and write
+    # The Developer's research, decide and write, and the research calls of the two agents that pass.
+    assert capsys.readouterr().err == "comments=1 cost=$0.290000\n"
 
 
 def test_run_command_refuses_a_username_that_breaks_the_rule(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _use_settings(monkeypatch, username="Andok")
-    _use_developer_tools(monkeypatch)
+    _use_agent_tools(monkeypatch)
     llm = FakeLLM()
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
     with pytest.raises(SystemExit) as exc:
@@ -392,8 +409,8 @@ def test_run_command_still_prints_a_comment_when_every_tool_fails(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _use_settings(monkeypatch)
-    _use_developer_tools(monkeypatch, ToolError("github is down"))
-    llm = FakeLLM(rules=[*_COMMENTS, (_is_write, "It is widely used.")])
+    _use_agent_tools(monkeypatch, ToolError("github is down"))
+    llm = FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "It is widely used.")])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
     cli.main(["run", "Rust"])
@@ -411,7 +428,7 @@ def test_run_command_llm_error_becomes_clean_message(
         return _FailingLLM()
 
     _use_settings(monkeypatch)
-    _use_developer_tools(monkeypatch)
+    _use_agent_tools(monkeypatch)
     monkeypatch.setattr(cli, "_make_llm", make_llm)
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", "Rust"])
@@ -438,10 +455,10 @@ def test_ctrl_c_prints_one_line_and_exits_with_130(
 
 
 def _use_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **overrides: Any) -> Path:
-    """Settings with a temporary database, and the Developer's tools so its role is in the registry."""
+    """Settings with a temporary database, and every role's tools so every role is in the registry."""
     db_path = tmp_path / "techdebate.db"
     _use_settings(monkeypatch, db_path=str(db_path), **overrides)
-    _use_developer_tools(monkeypatch)
+    _use_agent_tools(monkeypatch)
     return db_path
 
 
