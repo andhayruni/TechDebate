@@ -66,19 +66,49 @@ def test_duplicate_name_is_rejected() -> None:
 # default_roles
 
 
-async def test_developer_is_registered_with_the_real_tools_and_no_keys() -> None:
+_DEVELOPER = RoleSpec(
+    name="developer",
+    display_name="Developer",
+    question="Are developers building with it and using it?",
+    tool_names=("github_search", "github_repo", "pypi"),
+    prompt_id="developer.v1",
+)
+_SCIENTIST = RoleSpec(
+    name="scientist",
+    display_name="Scientist",
+    question="Are researchers publishing on it, and is that growing?",
+    tool_names=("arxiv",),
+    prompt_id="scientist.v1",
+)
+_POLLSTER = RoleSpec(
+    name="pollster",
+    display_name="Pollster",
+    question="Is the public interested, and is interest growing?",
+    tool_names=("youtube",),
+    prompt_id="pollster.v1",
+)
+
+
+async def test_all_three_agents_are_registered_in_order_with_a_youtube_key() -> None:
+    settings = _settings(youtube_api_key="key")
+    async with make_http_client(settings) as client:
+        registry = default_roles(default_tools(settings, client))
+
+    assert registry.roles() == [_DEVELOPER, _SCIENTIST, _POLLSTER]
+
+
+async def test_without_a_youtube_key_only_the_pollster_is_left_out(caplog: pytest.LogCaptureFixture) -> None:
     settings = _settings(youtube_api_key=None)
     async with make_http_client(settings) as client:
         registry = default_roles(default_tools(settings, client))
 
-    [developer] = registry.roles()
-    assert developer == RoleSpec(
-        name="developer",
-        display_name="Developer",
-        question="Are developers building with it and using it?",
-        tool_names=("github_search", "github_repo", "pypi"),
-        prompt_id="developer.v1",
-    )
+    assert registry.roles() == [_DEVELOPER, _SCIENTIST]  # arXiv needs no key
+    assert [record.getMessage() for record in caplog.records] == ["role left out role=pollster missing_tools=youtube"]
+
+
+@pytest.mark.parametrize(("name", "shown"), [("scientist", "Scientist"), ("pollster", "Pollster")])
+def test_display_names_of_the_new_agents(name: str, shown: str) -> None:
+    assert display_name(name) == shown
 
 
 async def test_every_role_names_tools_that_exist(caplog: pytest.LogCaptureFixture) -> None:
@@ -91,7 +121,7 @@ async def test_every_role_names_tools_that_exist(caplog: pytest.LogCaptureFixtur
 
 
 def test_developer_is_left_out_when_a_tool_is_missing(caplog: pytest.LogCaptureFixture) -> None:
-    registry = default_roles(_tools("github_search", "github_repo"))
+    registry = default_roles(_tools("github_search", "github_repo"), [_DEVELOPER])
 
     assert registry.roles() == []
     [record] = caplog.records

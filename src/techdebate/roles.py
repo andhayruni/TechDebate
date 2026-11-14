@@ -26,6 +26,20 @@ ROLE_SPECS: tuple[RoleSpec, ...] = (
         tool_names=("github_search", "github_repo", "pypi"),
         prompt_id="developer.v1",
     ),
+    RoleSpec(
+        name="scientist",
+        display_name="Scientist",
+        question="Are researchers publishing on it, and is that growing?",
+        tool_names=("arxiv",),
+        prompt_id="scientist.v1",
+    ),
+    RoleSpec(
+        name="pollster",
+        display_name="Pollster",
+        question="Is the public interested, and is interest growing?",
+        tool_names=("youtube",),
+        prompt_id="pollster.v1",
+    ),
 )
 
 
