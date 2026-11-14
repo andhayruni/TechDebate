@@ -30,5 +30,9 @@ class UserError(TechDebateError):
     """A username that breaks the rules, or that belongs to a user of the other kind."""
 
 
+class ForumError(TechDebateError):
+    """A write the forum refuses: a post by an agent, blank text, or a reply to a message that does not exist."""
+
+
 class BudgetExceeded(TechDebateError):
     """A spending cap was reached."""
