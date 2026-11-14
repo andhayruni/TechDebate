@@ -2,9 +2,11 @@ import pytest
 
 from techdebate.errors import ForumError, TechDebateError
 from techdebate.forum import Forum
-from techdebate.models import Message, User, UserKind
+from techdebate.models import Message, NotificationOutcome, NotificationReason, User, UserKind
 from techdebate.store import Store
 from techdebate.tree import Tree
+
+MENTION = NotificationReason.MENTION
 
 
 async def _setup(store: Store) -> tuple[Forum, User, User]:
@@ -12,7 +14,22 @@ async def _setup(store: Store) -> tuple[Forum, User, User]:
     developer = User(username="developer", kind=UserKind.AGENT)
     await store.add_user(me)
     await store.add_user(developer)
-    return Forum(store), me, developer
+    return Forum(store, [developer]), me, developer
+
+
+async def _pending(store: Store, *users: User) -> list[tuple[str, str, NotificationReason]]:
+    """(username, message text, reason) for each pending notification of these users, oldest first per user."""
+    found: list[tuple[str, str, NotificationReason]] = []
+    for user in users:
+        for notification in await store.list_notifications(user.id):
+            message = await store.get_message(notification.message_id)
+            assert message is not None
+            found.append((user.username, message.text, notification.reason))
+    return found
+
+
+async def _close_all(store: Store, user: User) -> None:
+    await store.close_notifications([n.id for n in await store.list_notifications(user.id)], NotificationOutcome.SEEN)
 
 
 async def _saved(store: Store, post: Message) -> list[Message]:
@@ -115,3 +132,75 @@ async def test_the_text_is_saved_without_its_surrounding_whitespace(store: Store
     assert post.text == "Is Rust growing?"
     assert comment.text == "Yes.\n\n  See   the repo."  # the whitespace inside stays as written
     assert await _saved(store, post) == [post, comment]
+
+
+# Notifications
+
+
+async def test_notifications_are_saved_with_their_message(store: Store) -> None:
+    forum, me, developer = await _setup(store)
+
+    post = await forum.create_post(me, "Is Rust growing?")
+    comment = await forum.create_comment(developer, post.id, "Yes.")
+
+    [for_developer] = await store.list_notifications(developer.id)
+    [for_me] = await store.list_notifications(me.id)
+    assert (for_developer.post_id, for_developer.message_id, for_developer.reason) == (
+        post.id,
+        post.id,
+        NotificationReason.NEW_POST,
+    )
+    assert (for_me.post_id, for_me.message_id, for_me.reason) == (post.id, comment.id, NotificationReason.TOP_LEVEL)
+
+
+async def test_a_refused_write_saves_no_notifications(store: Store) -> None:
+    forum, me, developer = await _setup(store)
+    post = await forum.create_post(me, "Is Rust growing?")
+
+    for write in (forum.create_comment(me, post.id, " "), forum.create_comment(me, "unknown", "@developer")):
+        with pytest.raises(ForumError):
+            await write
+
+    assert await _pending(store, me, developer) == [("developer", "Is Rust growing?", NotificationReason.NEW_POST)]
+
+
+async def test_mentions_are_looked_up_and_names_that_are_not_users_ignored(store: Store) -> None:
+    forum, me, developer = await _setup(store)
+    ann = User(username="ann", kind=UserKind.REAL)
+    await store.add_user(ann)
+    post = await forum.create_post(me, "Is Rust growing?")
+
+    await forum.create_comment(me, post.id, "@Developer and @ann, and @nobody or write to me@ann.io")
+
+    assert await _pending(store, ann) == [("ann", "@Developer and @ann, and @nobody or write to me@ann.io", MENTION)]
+    assert [n.reason for n in await store.list_notifications(developer.id)] == [NotificationReason.NEW_POST, MENTION]
+
+
+async def test_a_mention_notifies_once_and_does_not_join_the_thread(store: Store) -> None:
+    forum, me, developer = await _setup(store)
+    scientist = User(username="scientist", kind=UserKind.AGENT)
+    await store.add_user(scientist)
+    forum = Forum(store, [developer, scientist])
+    post = await forum.create_post(me, "Is Rust growing?")
+    first = await forum.create_comment(developer, post.id, "Yes.")
+    await _close_all(store, scientist)
+
+    await forum.create_comment(me, first.id, "What do you think, @scientist?")
+    await forum.create_comment(developer, first.id, "GitHub says so.")
+
+    assert await _pending(store, scientist) == [("scientist", "What do you think, @scientist?", MENTION)]
+
+
+async def test_an_agent_outside_the_registry_is_not_notified(store: Store) -> None:
+    forum, me, developer = await _setup(store)
+    retired = User(username="retired", kind=UserKind.AGENT)
+    await store.add_user(retired)
+    with_retired = Forum(store, [developer, retired])  # before its role was removed
+    post = await with_retired.create_post(me, "Is Rust growing?")
+    first = await with_retired.create_comment(retired, post.id, "Yes.")
+    await _close_all(store, retired)
+
+    await forum.create_comment(me, first.id, "Thanks, @retired.")
+    await forum.create_post(me, "Is Go growing?")
+
+    assert await store.list_notifications(retired.id) == []

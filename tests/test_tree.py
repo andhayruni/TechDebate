@@ -71,7 +71,7 @@ async def test_the_numbers_stay_the_same_as_comments_are_added(store: Store) -> 
     developer = User(username="developer", kind=UserKind.AGENT)
     await store.add_user(me)
     await store.add_user(developer)
-    forum = Forum(store)
+    forum = Forum(store, [developer])
     post = await forum.create_post(me, "Is Rust growing?")
     first = await forum.create_comment(developer, post.id, "Yes.")
     reply = await forum.create_comment(me, first.id, "Source?")
