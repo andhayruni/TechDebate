@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # searches, under the limit of 10 a minute without a token.
     max_queries_per_tool: int = Field(default=2, ge=1)
 
+    # How much of each reply an agent sees in the overview of a post, in characters. Top-level comments are shown in
+    # full. 300 is about the first one or two sentences of an agent's comment.
+    overview_reply_chars: int = Field(default=300, ge=1)
+
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0
     llm_max_retries: int = 1
