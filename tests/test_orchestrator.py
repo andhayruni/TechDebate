@@ -137,8 +137,10 @@ async def test_an_agent_researches_decides_and_comments_on_the_post() -> None:
     report = decide.messages[0].content.removeprefix(f"{_OVERVIEW}\n\n{decide_block}\n\n")
     assert report.startswith("Tool results:\n\n")
     assert decide.output_schema is not None
-    # The write call gets the post, the same tool report, and the point the decision gave for its place.
-    assert write.messages[0].content == f"Post: Rust\n\n{report}\n\nYour point: Downloads doubled."
+    # The write call gets the same overview and tool report, where the comment goes, and the point for its place.
+    assert write.messages[0].content == (
+        f"{_OVERVIEW}\n\n{report}\n\nYour comment: a top-level comment on the post.\nYour point: Downloads doubled."
+    )
     assert "https://example.com/x" in report
 
 
@@ -193,6 +195,64 @@ async def test_two_agents_both_comment_on_one_post_in_registration_order() -> No
     ]
     assert all((c.post_id, c.parent_id) == (_POST.id, _POST.id) for c in comments)
     assert _prompt_ids(llm) == ["research.v1", "decide.v1", "developer.v1"] * 2
+
+
+async def test_a_later_agent_sees_the_earlier_comments_as_new_and_can_reply_to_them() -> None:
+    first, second = _role("first"), _role("second")
+    long = "First view, " + "with a long explanation " * 20
+    reply = SpeakDecision(reason="I disagree.", reply_to=[ReplyTo(place=1, point="Downloads are flat.")])
+    llm = FakeLLM(
+        rules=[
+            _plans("first", _RESEARCH),
+            _plans("second", _RESEARCH),
+            _decides("first", _COMMENT),
+            _decides("second", reply),
+            _writes(long, "first"),
+            _writes("No, flat.", "second"),
+        ]
+    )
+    agents = _agents(first, second)
+
+    top, answer = await _run(llm, first, second, agents=agents)
+
+    assert (answer.author_id, answer.parent_id, answer.post_id) == (agents["second"].id, top.id, _POST.id)
+    research, decide, write = llm.calls[3:]
+    overview = f"Post by me:\nRust\n\n  #1 first [AI]:\n  {long}"
+    assert research.messages[0].content == f"{overview}\n\nNew to you: the post, #1."
+    assert decide.messages[0].content.startswith(
+        f"{overview}\n\nNew to you: the post, #1.\nYou can comment on: 0 (a top-level comment on the post), #1."
+    )
+    # A reply is written from the thread it goes in, and says which comment it answers.
+    assert write.messages[0].content.startswith(f"{overview}\n\nTool results:")
+    assert write.messages[0].content.endswith("Your comment: a reply to #1.\nYour point: Downloads are flat.")
+
+
+async def test_several_places_are_written_in_order_from_the_discussion_the_decision_saw() -> None:
+    first, second = _role("first"), _role("second")
+    both = SpeakDecision(
+        reason="Two points.",
+        reply_to=[ReplyTo(place=1, point="Reply point."), ReplyTo(place=0, point="Own point.")],
+    )
+    llm = FakeLLM(
+        rules=[
+            _plans("first", _RESEARCH),
+            _plans("second", _RESEARCH),
+            _decides("first", _COMMENT),
+            _decides("second", both),
+            _writes("First view.", "first"),
+            (lambda r: _by("developer.v1", "second")(r) and "Reply point." in r.messages[0].content, "A reply."),
+            (lambda r: _by("developer.v1", "second")(r) and "Own point." in r.messages[0].content, "A view."),
+        ]
+    )
+
+    top, answer, view = await _run(llm, first, second)
+
+    assert [(c.text, c.parent_id) for c in (answer, view)] == [("A reply.", top.id), ("A view.", _POST.id)]
+    reply_write, view_write = llm.calls[-2:]
+    assert reply_write.messages[0].content.endswith("Your comment: a reply to #1.\nYour point: Reply point.")
+    # The top-level comment is written from the overview the decision saw, without the reply written just before.
+    assert "A reply." not in view_write.messages[0].content
+    assert view_write.messages[0].content.startswith("Post by me:\nRust\n\n  #1 first [AI]:\n  First view.\n\nTool")
 
 
 async def test_an_agent_after_a_pass_still_gets_its_look() -> None:

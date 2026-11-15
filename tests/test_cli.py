@@ -336,7 +336,7 @@ def test_run_command_prints_the_post_and_the_comment_with_its_ai_label(
     cli.main(["run", "Rust"])
 
     out, err = capsys.readouterr()
-    assert out == f"me:\nRust\n\n  Developer [AI]:\n  {text}\n"
+    assert out == f"me:\nRust\n\n  #1 Developer [AI]:\n  {text}\n"
     assert err == "comments=1 cost=$0.000000\n"
 
 
@@ -390,20 +390,38 @@ def test_run_command_refuses_a_username_that_breaks_the_rule(
     assert llm.calls == []
 
 
-def test_format_post_indents_each_comment_and_labels_only_agents() -> None:
-    me = User(username="me", kind=UserKind.REAL)
-    developer = User(username="developer", kind=UserKind.AGENT)
-    retired = User(username="retired", kind=UserKind.AGENT)
-    post = Message(author_id=me.id, text="Is Rust\ngrowing?")
-    comments = [
-        Message(post_id=post.id, parent_id=post.id, author_id=author.id, text=text)
-        for author, text in ((developer, "Yes.\nIt is."), (retired, "Two."))
-    ]
-    users = {user.id: user for user in (me, developer, retired)}
+def test_run_command_prints_a_reply_to_an_earlier_agent_nested_under_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_settings(monkeypatch)
+    _use_agent_tools(monkeypatch)
 
-    assert cli._format_post(post, comments, users) == (  # pyright: ignore[reportPrivateUsage]
-        "me:\nIs Rust\ngrowing?\n\n  Developer [AI]:\n  Yes.\n  It is.\n\n  retired [AI]:\n  Two."
+    def of(display_name: str, prompt_id: str) -> Predicate:
+        def matches(request: LLMRequest) -> bool:
+            return request.prompt_id == prompt_id and request.system.startswith(f"You are the {display_name},")
+
+        return matches
+
+    reply = SpeakDecision(reason="I disagree.", reply_to=[ReplyTo(place=1, point="Few papers.")])
+    llm = FakeLLM(
+        rules=[
+            _passes_at_research("Pollster", ("youtube",)),
+            (of("Scientist", "research.v1"), ResearchPlan(speak=True, queries={"arxiv": ["x"]}, reason="Papers.")),
+            (of("Scientist", "decide.v1"), reply),
+            (of("Scientist", "scientist.v1"), "Few papers so far."),
+            *_COMMENTS,
+            (_is_write, "Developers use it."),
+        ]
     )
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+
+    cli.main(["run", "Rust"])
+
+    out, err = capsys.readouterr()
+    assert out == (
+        "me:\nRust\n\n  #1 Developer [AI]:\n  Developers use it.\n\n    #2 Scientist [AI]:\n    Few papers so far.\n"
+    )
+    assert err == "comments=2 cost=$0.000000\n"
 
 
 def test_run_command_still_prints_a_comment_when_every_tool_fails(
@@ -417,7 +435,7 @@ def test_run_command_still_prints_a_comment_when_every_tool_fails(
     cli.main(["run", "Rust"])
 
     out, err = capsys.readouterr()
-    assert out == "me:\nRust\n\n  Developer [AI]:\n  It is widely used.\n"
+    assert out == "me:\nRust\n\n  #1 Developer [AI]:\n  It is widely used.\n"
     assert err.count("tool failed") == 3  # each failed tool still logs its warning
     assert err.splitlines()[-1] == "comments=1 cost=$0.000000"
 
