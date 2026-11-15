@@ -11,14 +11,24 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from pydantic import TypeAdapter
 from sqlalchemy import Connection, event, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from techdebate.config import Settings
 from techdebate.errors import StoreError
-from techdebate.models import Message, Notification, NotificationOutcome, User, UserKind
+from techdebate.models import (
+    LLMCall,
+    Message,
+    Notification,
+    NotificationOutcome,
+    Research,
+    ToolResult,
+    User,
+    UserKind,
+)
 from techdebate.store.base import PostWithComments, Store, StoreOps
-from techdebate.store.tables import MessageRow, NotificationRow, UserRow
+from techdebate.store.tables import LLMCallRow, MessageRow, NotificationRow, ResearchRow, UserRow
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +48,23 @@ def _message(row: MessageRow) -> Message:
 
 def _notification(row: NotificationRow) -> Notification:
     return Notification.model_validate(row, from_attributes=True)
+
+
+def _llm_call(row: LLMCallRow) -> LLMCall:
+    return LLMCall.model_validate(row, from_attributes=True)
+
+
+_RESULTS = TypeAdapter(list[ToolResult])
+
+
+def _research(row: ResearchRow) -> Research:
+    return Research(
+        id=row.id,
+        agent_id=row.agent_id,
+        post_id=row.post_id,
+        results=_RESULTS.validate_json(row.results),
+        created_at=row.created_at,
+    )
 
 
 class _SessionOps:
@@ -109,6 +136,24 @@ class _SessionOps:
             .values(closed_at=datetime.now(UTC), outcome=outcome)
         )
 
+    async def add_llm_call(self, call: LLMCall) -> None:
+        self._session.add(LLMCallRow(**call.model_dump()))
+        await self._session.flush()
+
+    async def list_llm_calls(self, post_id: str) -> list[LLMCall]:
+        query = select(LLMCallRow).where(LLMCallRow.post_id == post_id).order_by(LLMCallRow.seq)
+        return [_llm_call(row) for row in await self._session.scalars(query)]
+
+    async def add_research(self, research: Research) -> None:
+        results = _RESULTS.dump_json(research.results).decode()
+        self._session.add(ResearchRow(**research.model_dump(exclude={"results"}), results=results))
+        await self._session.flush()
+
+    async def get_research(self, agent_id: str, post_id: str) -> Research | None:
+        query = select(ResearchRow).where(ResearchRow.agent_id == agent_id, ResearchRow.post_id == post_id)
+        row = await self._session.scalar(query)
+        return None if row is None else _research(row)
+
 
 class SqliteStore:
     def __init__(self, engine: AsyncEngine) -> None:
@@ -168,6 +213,22 @@ class SqliteStore:
     async def close_notifications(self, notification_ids: Sequence[str], outcome: NotificationOutcome) -> None:
         async with self.transaction() as tx:
             await tx.close_notifications(notification_ids, outcome)
+
+    async def add_llm_call(self, call: LLMCall) -> None:
+        async with self.transaction() as tx:
+            await tx.add_llm_call(call)
+
+    async def list_llm_calls(self, post_id: str) -> list[LLMCall]:
+        async with self._read() as ops:
+            return await ops.list_llm_calls(post_id)
+
+    async def add_research(self, research: Research) -> None:
+        async with self.transaction() as tx:
+            await tx.add_research(research)
+
+    async def get_research(self, agent_id: str, post_id: str) -> Research | None:
+        async with self._read() as ops:
+            return await ops.get_research(agent_id, post_id)
 
 
 def _on_connect(dbapi_connection: Any, _record: Any) -> None:

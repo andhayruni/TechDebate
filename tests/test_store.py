@@ -9,12 +9,24 @@ from typing import Any
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
+from pydantic import HttpUrl
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.exc import IntegrityError, StatementError
 
 from techdebate.config import Settings
 from techdebate.errors import StoreError
-from techdebate.models import Message, Notification, NotificationOutcome, NotificationReason, User, UserKind
+from techdebate.models import (
+    Evidence,
+    LLMCall,
+    Message,
+    Notification,
+    NotificationOutcome,
+    NotificationReason,
+    Research,
+    ToolResult,
+    User,
+    UserKind,
+)
 from techdebate.store import Store, open_store
 from techdebate.store.tables import Base
 
@@ -193,6 +205,101 @@ async def test_closed_notifications_keep_their_first_outcome(store: Store) -> No
     assert closed_again == closed
 
 
+async def _two_posts(store: Store) -> tuple[User, Message, Message]:
+    me, developer = await _users(store)
+    post = Message(author_id=me.id, text="Is Rust growing?")
+    other = Message(author_id=me.id, text="Is Go growing?")
+    await store.add_message(post)
+    await store.add_message(other)
+    return developer, post, other
+
+
+def _call(agent: User, post: Message, prompt_id: str) -> LLMCall:
+    return LLMCall(
+        agent_id=agent.id,
+        post_id=post.id,
+        prompt_id=prompt_id,
+        model="claude-haiku-5-5",
+        input_tokens=1234,
+        output_tokens=56,
+        cost_usd=0.000151,
+        duration_s=1.7,
+        created_at=datetime(2026, 11, 15, tzinfo=UTC),
+    )
+
+
+async def test_llm_calls_are_listed_per_post_oldest_first(store: Store) -> None:
+    developer, post, other = await _two_posts(store)
+    # Saved in this order, all at the same moment.
+    calls = [_call(developer, post, "research.v1"), _call(developer, other, "research.v1")]
+    calls += [_call(developer, post, "decide.v1"), _call(developer, post, "developer.v1")]
+    for call in calls:
+        await store.add_llm_call(call)
+
+    assert await store.list_llm_calls(post.id) == [calls[0], calls[2], calls[3]]
+    assert await store.list_llm_calls(other.id) == [calls[1]]
+    assert await store.list_llm_calls("unknown") == []
+
+
+async def test_an_llm_call_needs_a_known_agent_and_post(store: Store) -> None:
+    developer, post, _ = await _two_posts(store)
+
+    with pytest.raises(IntegrityError):
+        await store.add_llm_call(_call(developer, post, "decide.v1").model_copy(update={"post_id": "unknown"}))
+    with pytest.raises(IntegrityError):
+        await store.add_llm_call(_call(developer, post, "decide.v1").model_copy(update={"agent_id": "nobody"}))
+
+
+def _results() -> list[ToolResult]:
+    """One of each outcome: evidence, no information, a failed tool and a tool not used."""
+    evidence = Evidence(
+        source="github_search",
+        query="rust",
+        url=HttpUrl("https://github.com/search?q=rust&type=repositories"),
+        title="GitHub repositories matching 'rust'",
+        summary="12,345 repositories match 'rust' on GitHub",
+        value=12345,
+        fetched_at=datetime(2026, 11, 15, 9, 30, tzinfo=UTC),
+    )
+    return [
+        ToolResult(tool="github_search", query="rust", evidence=[evidence]),
+        ToolResult(tool="github_repo", query="rust-lang/rust"),
+        ToolResult(tool="github_repo", query="rust", failed=True),
+        ToolResult(tool="pypi", query=None),
+    ]
+
+
+async def test_research_round_trips_with_every_outcome(store: Store) -> None:
+    developer, post, _ = await _two_posts(store)
+    research = Research(agent_id=developer.id, post_id=post.id, results=_results())
+
+    await store.add_research(research)
+
+    assert await store.get_research(developer.id, post.id) == research
+
+
+async def test_research_is_none_for_another_agent_or_post(store: Store) -> None:
+    developer, post, other = await _two_posts(store)
+    me = await store.find_user("me")
+    assert me is not None
+    await store.add_research(Research(agent_id=developer.id, post_id=post.id, results=_results()))
+
+    assert await store.get_research(developer.id, other.id) is None
+    assert await store.get_research(me.id, post.id) is None
+
+
+async def test_an_agent_researches_a_post_once(store: Store) -> None:
+    """A second save is a bug, so the database error goes up unchanged, and the first research stays."""
+    developer, post, _ = await _two_posts(store)
+    first = Research(agent_id=developer.id, post_id=post.id, results=_results())
+    await store.add_research(first)
+
+    with pytest.raises(IntegrityError):
+        await store.add_research(Research(agent_id=developer.id, post_id=post.id, results=[]))
+
+    assert await store.get_research(developer.id, post.id) == first
+
+
 async def test_a_failed_transaction_saves_nothing(store: Store) -> None:
     with pytest.raises(RuntimeError):
         async with store.transaction() as tx:
@@ -224,6 +331,9 @@ async def test_transactions_run_one_after_the_other_across_two_stores(db_path: P
         assert [user.username for user in await first.list_users()] == ["user0", "user1"]
 
 
+_HEAD = "0003"  # the newest migration
+
+
 def _revision(db_path: Path) -> str:
     with sqlite3.connect(db_path) as connection:
         return connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
@@ -234,7 +344,7 @@ async def test_a_new_database_is_created_and_logged(db_path: Path, caplog: pytes
         async with open_store(_settings(db_path)):
             pass
 
-    assert _revision(db_path) == "0001"
+    assert _revision(db_path) == _HEAD
     assert f"created database path={db_path}" in caplog.text
 
 
@@ -247,7 +357,7 @@ async def test_opening_again_keeps_the_data_and_logs_nothing(db_path: Path, capl
         async with open_store(_settings(db_path)) as store:
             assert await store.list_users() == [user]
 
-    assert _revision(db_path) == "0001"
+    assert _revision(db_path) == _HEAD
     assert "created database" not in caplog.text
 
 

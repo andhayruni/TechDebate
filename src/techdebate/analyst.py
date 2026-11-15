@@ -4,7 +4,6 @@ writes the comment."""
 import asyncio
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
 from types import GenericAlias
 from typing import Annotated, Any, Literal, cast
 
@@ -13,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, WithJsonSchema, create_model
 from techdebate.config import Settings
 from techdebate.errors import LLMError, NotFoundError, ToolError
 from techdebate.llm import LLMClient, LLMRequest, Message, ModelTier
-from techdebate.models import Evidence, ResearchPlan, SpeakDecision
+from techdebate.models import ResearchPlan, SpeakDecision, ToolResult
 from techdebate.prompts import load_prompt_by_id
 from techdebate.roles import RoleSpec
 from techdebate.tools import ToolRegistry, format_evidence
@@ -25,16 +24,6 @@ _RESEARCH_PROMPT_ID = "research.v1"
 _DECIDE_PROMPT_ID = "decide.v1"
 
 _POST = 0  # the place for a top-level comment: the post itself
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    """What one query found. With no evidence, the query found no information, or the tool failed."""
-
-    tool: str
-    query: str | None  # None: the tool was not used
-    evidence: list[Evidence] = field(default_factory=list[Evidence])
-    failed: bool = False
 
 
 def _plan_schema(tool_names: Iterable[str]) -> type[ResearchPlan]:

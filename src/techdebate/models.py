@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Self
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 def _new_id() -> str:
@@ -27,6 +27,17 @@ class Evidence(BaseModel):
     summary: str
     value: float | None = None
     fetched_at: datetime = Field(default_factory=_now)
+
+
+class ToolResult(BaseModel):
+    """What one query found. With no evidence, the query found no information, or the tool failed."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tool: str
+    query: str | None  # None: the tool was not used
+    evidence: list[Evidence] = Field(default_factory=list[Evidence])
+    failed: bool = False
 
 
 class ResearchPlan(BaseModel):
@@ -116,3 +127,28 @@ class Notification(BaseModel):
         if (self.closed_at is None) != (self.outcome is None):
             raise ValueError("a notification has both closed_at and outcome, or neither")
         return self
+
+
+class LLMCall(BaseModel):
+    """One AI call an agent made on a post, as it returned."""
+
+    id: str = Field(default_factory=_new_id)
+    agent_id: str
+    post_id: str
+    prompt_id: str  # which call it was, e.g. "research.v1"
+    model: str  # the model that answered
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    duration_s: float  # the whole call, retries included
+    created_at: datetime = Field(default_factory=_now)  # when the call returned
+
+
+class Research(BaseModel):
+    """What an agent found when it researched a post: one per agent and post, so it never searches a post twice."""
+
+    id: str = Field(default_factory=_new_id)
+    agent_id: str
+    post_id: str
+    results: list[ToolResult]  # in the order gather returns them, including the tools not used
+    created_at: datetime = Field(default_factory=_now)

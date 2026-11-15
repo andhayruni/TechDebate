@@ -7,7 +7,7 @@ read, even for rows saved in the same moment. The uuid `id` stays the ID everyth
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import DateTime, ForeignKey, Index, MetaData, Text
+from sqlalchemy import DateTime, ForeignKey, Index, MetaData, Text, UniqueConstraint
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
@@ -15,7 +15,7 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 # Named constraints, so that later migrations can change them (SQLite rebuilds the table to do it).
 _NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
-    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
     "ck": "ck_%(table_name)s_%(constraint_name)s",
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
@@ -79,3 +79,32 @@ class NotificationRow(Base):
     created_at: Mapped[datetime]
     closed_at: Mapped[datetime | None]
     outcome: Mapped[str | None]
+
+
+class LLMCallRow(Base):
+    __tablename__ = "llm_calls"
+
+    seq: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[str] = mapped_column(unique=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    post_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), index=True)  # a post's calls
+    prompt_id: Mapped[str]
+    model: Mapped[str]
+    input_tokens: Mapped[int]
+    output_tokens: Mapped[int]
+    cost_usd: Mapped[float]
+    duration_s: Mapped[float]
+    created_at: Mapped[datetime]
+
+
+class ResearchRow(Base):
+    """One per agent and post. The results are JSON text: they are only ever read back whole."""
+
+    __tablename__ = "research"
+    __table_args__ = (UniqueConstraint("agent_id", "post_id"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    post_id: Mapped[str] = mapped_column(ForeignKey("messages.id"))
+    results: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime]
