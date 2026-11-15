@@ -45,9 +45,10 @@ class Settings(BaseSettings):
     strong_effort: Effort = "high"
     model_prices: dict[str, ModelPrice] = Field(default_factory=_default_prices)
 
-    # Thinking counts against this too, so it leaves room for both.
+    # Thinking counts against this too, so it leaves room for both. A decision with a point for each place it picks
+    # reached 768 output tokens in the real runs, so the cheap calls get 2048.
     write_max_tokens: int = Field(default=4096, ge=1)
-    decide_max_tokens: int = Field(default=1024, ge=1)
+    decide_max_tokens: int = Field(default=2048, ge=1)
 
     # How many queries a role's decision can run per tool. Each costs quota: at 2, a Developer run makes 6-8 GitHub
     # searches, under the limit of 10 a minute without a token.
@@ -56,6 +57,9 @@ class Settings(BaseSettings):
     # How much of each reply an agent sees in the overview of a post, in characters. Top-level comments are shown in
     # full. 300 is about the first one or two sentences of an agent's comment.
     overview_reply_chars: int = Field(default=300, ge=1)
+
+    # How many comments an agent may write in one thread, its top-level comment included.
+    max_comments_per_thread: int = Field(default=3, ge=1)
 
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0

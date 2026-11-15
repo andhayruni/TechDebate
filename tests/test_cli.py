@@ -23,6 +23,7 @@ from techdebate.models import (
     Message,
     Notification,
     NotificationReason,
+    ReplyTo,
     ResearchPlan,
     SpeakDecision,
     User,
@@ -274,7 +275,7 @@ def _is_decide(request: LLMRequest) -> bool:
 # The research and decide calls of an agent that comments on the post.
 _COMMENTS: list[tuple[Predicate, Reply]] = [
     (_is_research, _RESEARCH),
-    (_is_decide, SpeakDecision(reply_to=[0], reason="The data is new.")),
+    (_is_decide, SpeakDecision(reason="The data is new.", reply_to=[ReplyTo(place=0, point="It is used.")])),
 ]
 
 

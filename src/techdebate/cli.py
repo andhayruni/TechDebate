@@ -72,7 +72,9 @@ async def _run_command(text: str, meter: CostMeter) -> tuple[Message, list[Messa
         tools = default_tools(settings, client)
         roles = default_roles(tools)
         agents = {role.name: User(username=role.name, kind=UserKind.AGENT) for role in roles.roles()}
-        comments = await check_post(post, agents=agents, llm=meter, roles=roles, tools=tools, settings=settings)
+        comments = await check_post(
+            post, author=me, agents=agents, llm=meter, roles=roles, tools=tools, settings=settings
+        )
     users = {user.id: user for user in (me, *agents.values())}
     return post, comments, users
 

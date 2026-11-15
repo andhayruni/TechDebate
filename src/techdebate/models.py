@@ -49,11 +49,19 @@ class ResearchPlan(BaseModel):
     reason: str
 
 
+class ReplyTo(BaseModel):
+    """One place an agent comments on, with the point its comment there makes."""
+
+    place: int  # 0 is the post itself, and n is comment #n
+    point: str
+
+
 class SpeakDecision(BaseModel):
     """Where an agent comments, after its research. The model fills this in from choices built for each call."""
 
-    reply_to: list[int]  # the places to comment: 0 is the post itself. Empty: a pass
+    # First, so the model gives its reason before it picks the places.
     reason: str
+    reply_to: list[ReplyTo]  # empty: a pass
 
 
 class UserKind(StrEnum):
