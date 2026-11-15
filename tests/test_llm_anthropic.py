@@ -152,26 +152,30 @@ async def test_per_call_literal_schema(reply_to: Any, sent_schema: dict[str, Any
 
 @pytest.mark.parametrize("places", [[0], [0, 3, 5]])
 async def test_per_call_list_of_places_stays_strict(places: list[int]) -> None:
-    # A plain list[Literal[0]] would send {"const": 0}, which the transform moves into the description, so the
-    # decision schema gives its items an enum.
+    # A plain Literal[0] would send {"const": 0}, which the transform moves into the description, so the decision
+    # schema gives each item's place an enum.
     schema = _decision_schema(places)
+    reply = {"reason": "r", "reply_to": [{"place": place, "point": f"p{place}"} for place in places]}
     sent: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         sent.append(json.loads(request.content))
-        return httpx2.Response(200, json=_message(json.dumps({"reply_to": places, "reason": "r"})))
+        return httpx2.Response(200, json=_message(json.dumps(reply)))
 
     response = await _llm(handler).generate(_request(schema=schema))
 
-    sent_reply_to = sent[0]["output_config"]["format"]["schema"]["properties"]["reply_to"]
+    sent_schema = sent[0]["output_config"]["format"]["schema"]
+    sent_reply_to = sent_schema["properties"]["reply_to"]
     assert sent_reply_to["type"] == "array"
-    assert sent_reply_to["items"] == {"type": "integer", "enum": places}
+    assert sent_reply_to["items"] == {"$ref": "#/$defs/ReplyTo"}
+    place = sent_schema["$defs"]["ReplyTo"]["properties"]["place"]
+    assert {k: v for k, v in place.items() if k != "title"} == {"type": "integer", "enum": places}
     assert isinstance(response.parsed, schema)
-    assert response.parsed.model_dump() == {"reply_to": places, "reason": "r"}
+    assert response.parsed.model_dump() == reply
 
 
 async def test_per_call_list_of_places_refuses_a_place_not_offered() -> None:
-    llm = _llm(_reply(_message('{"reply_to": [1], "reason": "r"}')))
+    llm = _llm(_reply(_message('{"reason": "r", "reply_to": [{"place": 1, "point": "p"}]}')))
     with pytest.raises(LLMError, match="SpeakDecision"):
         await llm.generate(_request(schema=_decision_schema([0])))
 

@@ -9,7 +9,7 @@ from techdebate import cli
 from techdebate.config import Settings
 from techdebate.llm import FakeLLM, LLMRequest
 from techdebate.llm.fake import Predicate, Reply
-from techdebate.models import ResearchPlan, SpeakDecision
+from techdebate.models import ReplyTo, ResearchPlan, SpeakDecision
 
 _RESEARCH = ResearchPlan(
     speak=True,
@@ -22,8 +22,12 @@ _NO_PYPI = ResearchPlan(
     reason="Developers use this, but it is not a package.",
 )
 _SKIP = ResearchPlan(speak=False, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area.")
-_COMMENT_ON_POST = SpeakDecision(reply_to=[0], reason="The download numbers are new.")
-_NOTHING_NEW = SpeakDecision(reply_to=[], reason="The results only repeat the post.")
+_COMMENT_ON_POST = SpeakDecision(
+    reason="The download numbers are new.", reply_to=[ReplyTo(place=0, point="Downloads are heavy.")]
+)
+_NOTHING_NEW = SpeakDecision(reason="The results only repeat the post.", reply_to=[])
+_OVERVIEW = "Post by me:\nhttpx\n\n  No comments yet."
+_DECIDE_BLOCK = "New to you: the post.\nYou can comment on: 0 (a top-level comment on the post)."
 _COMMENT = "Developers use it, with [heavy downloads](https://pypistats.org/packages/httpx)."
 
 
@@ -76,11 +80,11 @@ def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
     research, decide, write, *others = llm.calls
     assert (research.prompt_id, decide.prompt_id, write.prompt_id) == ("research.v1", "decide.v1", "developer.v1")
     assert [call.prompt_id for call in others] == ["research.v1", "research.v1"]  # the Scientist, then the Pollster
-    assert research.messages[0].content == "Post: httpx"
-    # The write call gets what the decide call saw, and the point the decide call agreed to.
-    report = decide.messages[0].content.removeprefix("Post: httpx")
-    assert write.messages[0].content == f"Post: httpx{report}\n\nYour point: {_COMMENT_ON_POST.reason}"
-    assert report.startswith('\n\nTool results:\n\ngithub_search, query "httpx":\n')
+    assert research.messages[0].content == f"{_OVERVIEW}\n\nNew to you: the post."
+    # The write call gets the post, the tool report the decide call saw, and the point for its place.
+    report = decide.messages[0].content.removeprefix(f"{_OVERVIEW}\n\n{_DECIDE_BLOCK}\n\n")
+    assert write.messages[0].content == f"Post: httpx\n\n{report}\n\nYour point: Downloads are heavy."
+    assert report.startswith('Tool results:\n\ngithub_search, query "httpx":\n')
     for url in (
         "https://github.com/search?q=httpx&type=repositories",  # github_search
         "https://github.com/fastapi/fastapi/commits",  # github_repo

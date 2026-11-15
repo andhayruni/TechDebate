@@ -8,15 +8,15 @@ from techdebate.config import Settings
 from techdebate.errors import LLMError, PromptError, ToolError
 from techdebate.llm import CostMeter, FakeLLM, LLMRequest, LLMResponse
 from techdebate.llm.fake import Predicate, Reply
-from techdebate.models import Evidence, Message, ResearchPlan, SpeakDecision, User, UserKind
+from techdebate.models import Evidence, Message, ReplyTo, ResearchPlan, SpeakDecision, User, UserKind
 from techdebate.orchestrator import check_post
 from techdebate.roles import RoleRegistry, RoleSpec
 from techdebate.tools import ToolInput, ToolRegistry
 
 _RESEARCH = ResearchPlan(speak=True, queries={"stub": ["rust lang"]}, reason="In my area.")
 _SKIP = ResearchPlan(speak=False, queries={"stub": []}, reason="Not my area.")
-_COMMENT = SpeakDecision(reply_to=[0], reason="The data is new.")
-_PASS = SpeakDecision(reply_to=[], reason="Nothing new.")
+_COMMENT = SpeakDecision(reason="The data is new.", reply_to=[ReplyTo(place=0, point="Downloads doubled.")])
+_PASS = SpeakDecision(reason="Nothing new.", reply_to=[])
 _PRICES = {"research.v1": 0.01, "decide.v1": 0.02, "developer.v1": 0.25}
 
 
@@ -54,6 +54,7 @@ class _PricedLLM(FakeLLM):
 
 _ME = User(username="me", kind=UserKind.REAL)
 _POST = Message(author_id=_ME.id, text="Rust")
+_OVERVIEW = "Post by me:\nRust\n\n  No comments yet."
 
 
 def _role(name: str = "developer", prompt_id: str = "developer.v1") -> RoleSpec:
@@ -99,6 +100,7 @@ async def _run(
     roles = roles or (_role(),)
     return await check_post(
         _POST,
+        author=_ME,
         agents=agents if agents is not None else _agents(*roles),
         llm=llm,
         roles=RoleRegistry(roles),
@@ -129,12 +131,15 @@ async def test_an_agent_researches_decides_and_comments_on_the_post() -> None:
     assert tool.queries == ["rust lang"]  # the plan's query, not the post
     assert _prompt_ids(llm) == ["research.v1", "decide.v1", "developer.v1"]
     research, decide, write = llm.calls
-    assert research.messages[0].content == "Post: Rust"
-    # The write call gets what the decide call saw, and the point the decide call agreed to.
-    assert decide.messages[0].content.startswith("Post: Rust\n\nTool results:\n\n")
-    assert write.messages[0].content == f"{decide.messages[0].content}\n\nYour point: {_COMMENT.reason}"
-    assert "https://example.com/x" in decide.messages[0].content
-    assert "https://example.com/x" in write.messages[0].content
+    # Both cheap calls see the post alone, new to the agent, and the post is the only place open to it.
+    assert research.messages[0].content == f"{_OVERVIEW}\n\nNew to you: the post."
+    decide_block = "New to you: the post.\nYou can comment on: 0 (a top-level comment on the post)."
+    report = decide.messages[0].content.removeprefix(f"{_OVERVIEW}\n\n{decide_block}\n\n")
+    assert report.startswith("Tool results:\n\n")
+    assert decide.output_schema is not None
+    # The write call gets the post, the same tool report, and the point the decision gave for its place.
+    assert write.messages[0].content == f"Post: Rust\n\n{report}\n\nYour point: Downloads doubled."
+    assert "https://example.com/x" in report
 
 
 async def test_a_pass_at_the_research_call_searches_and_writes_nothing() -> None:
@@ -159,7 +164,7 @@ async def test_with_no_agents_there_are_no_comments() -> None:
     llm = FakeLLM()
 
     comments = await check_post(
-        _POST, agents={}, llm=llm, roles=RoleRegistry(), tools=ToolRegistry(), settings=_settings()
+        _POST, author=_ME, agents={}, llm=llm, roles=RoleRegistry(), tools=ToolRegistry(), settings=_settings()
     )
 
     assert comments == []
