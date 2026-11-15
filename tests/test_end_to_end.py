@@ -81,9 +81,11 @@ def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
     assert (research.prompt_id, decide.prompt_id, write.prompt_id) == ("research.v1", "decide.v1", "developer.v1")
     assert [call.prompt_id for call in others] == ["research.v1", "research.v1"]  # the Scientist, then the Pollster
     assert research.messages[0].content == f"{_OVERVIEW}\n\nNew to you: the post."
-    # The write call gets the post, the tool report the decide call saw, and the point for its place.
+    # The write call gets the overview and the tool report the decide call saw, and where it writes what.
     report = decide.messages[0].content.removeprefix(f"{_OVERVIEW}\n\n{_DECIDE_BLOCK}\n\n")
-    assert write.messages[0].content == f"Post: httpx\n\n{report}\n\nYour point: Downloads are heavy."
+    assert write.messages[0].content == (
+        f"{_OVERVIEW}\n\n{report}\n\nYour comment: a top-level comment on the post.\nYour point: Downloads are heavy."
+    )
     assert report.startswith('Tool results:\n\ngithub_search, query "httpx":\n')
     for url in (
         "https://github.com/search?q=httpx&type=repositories",  # github_search
@@ -96,7 +98,7 @@ def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
         assert "You are the Developer" in call.system
 
     out, err = capsys.readouterr()
-    assert out == f"me:\nhttpx\n\n  Developer [AI]:\n  {_COMMENT}\n"
+    assert out == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {_COMMENT}\n"
     assert err == "comments=1 cost=$0.000000\n"  # nothing else, so no tool failed and no role was left out
 
 
@@ -160,7 +162,7 @@ def test_a_comment_is_still_written_when_every_source_is_down(
         for tool in ("github_search", "github_repo", "pypi"):
             assert f'{tool}, query "httpx": the tool failed' in call.messages[0].content
     out, err = capsys.readouterr()
-    assert out == f"me:\nhttpx\n\n  Developer [AI]:\n  {text}\n"
+    assert out == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {text}\n"
     assert err.count("tool failed") == 3
 
 
@@ -195,19 +197,22 @@ def test_all_three_agents_research_with_their_own_tools_and_comment(
         *("research.v1", "decide.v1", "scientist.v1"),
         *("research.v1", "decide.v1", "pollster.v1"),
     ]
-    # Each agent's write call holds only its own tools' results.
+    # Each agent's write call holds only its own tools' results, after the comments of the agents before it.
     developer, scientist, pollster = (llm.calls[i].messages[0].content for i in (2, 5, 8))
-    assert "github.com" in developer and "arxiv.org" not in developer and "youtube.com" not in developer
-    assert "arxiv.org" in scientist and "github.com" not in scientist and "youtube.com" not in scientist
-    assert "youtube.com" in pollster and "github.com" not in pollster and "arxiv.org" not in pollster
-    assert scientist.startswith('Post: httpx\n\nTool results:\n\narxiv, query "vision transformer":\n')
-    assert pollster.startswith('Post: httpx\n\nTool results:\n\nyoutube, query "rust programming":\n')
+    reports = [content.split("Tool results:")[1] for content in (developer, scientist, pollster)]
+    assert "github.com" in reports[0] and "arxiv.org" not in reports[0] and "youtube.com" not in reports[0]
+    assert "arxiv.org" in reports[1] and "github.com" not in reports[1] and "youtube.com" not in reports[1]
+    assert "youtube.com" in reports[2] and "github.com" not in reports[2] and "arxiv.org" not in reports[2]
+    first = f"Post by me:\nhttpx\n\n  #1 Developer [AI]:\n  {comments['Developer']}"
+    second = f"{first}\n\n  #2 Scientist [AI]:\n  {comments['Scientist']}"
+    assert scientist.startswith(f'{first}\n\nTool results:\n\narxiv, query "vision transformer":\n')
+    assert pollster.startswith(f'{second}\n\nTool results:\n\nyoutube, query "rust programming":\n')
 
     out, err = capsys.readouterr()
     assert out == (
         "me:\nhttpx\n\n"
-        f"  Developer [AI]:\n  {comments['Developer']}\n\n"
-        f"  Scientist [AI]:\n  {comments['Scientist']}\n\n"
-        f"  Pollster [AI]:\n  {comments['Pollster']}\n"
+        f"  #1 Developer [AI]:\n  {comments['Developer']}\n\n"
+        f"  #2 Scientist [AI]:\n  {comments['Scientist']}\n\n"
+        f"  #3 Pollster [AI]:\n  {comments['Pollster']}\n"
     )
     assert err == "comments=3 cost=$0.000000\n"

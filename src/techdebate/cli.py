@@ -79,14 +79,6 @@ async def _run_command(text: str, meter: CostMeter) -> tuple[Message, list[Messa
     return post, comments, users
 
 
-def _format_post(post: Message, comments: list[Message], users: dict[str, User]) -> str:
-    def block(message: Message) -> str:
-        return f"{shown_name(users[message.author_id])}:\n{message.text}"
-
-    below = "\n\n".join(block(comment) for comment in comments) if comments else "No comments."
-    return f"{block(post)}\n\n{textwrap.indent(below, '  ')}"
-
-
 # The discussion in the database
 
 
@@ -255,7 +247,7 @@ def _run(args: argparse.Namespace) -> None:
     if args.command == "run":
         meter = CostMeter(_make_llm())
         post, comments, users = asyncio.run(_run_command(args.text, meter))
-        print(_format_post(post, comments, users))
+        print(_format_discussion(Tree(post, comments), users))
         print(f"comments={len(comments)} cost=${meter.total_usd:.6f}", file=sys.stderr)
     if args.command == "ask":
         response = asyncio.run(ask(_make_llm(), args.question, ModelTier(args.tier)))

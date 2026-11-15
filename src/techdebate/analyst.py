@@ -117,14 +117,18 @@ class Analyst:
         )
         return [result for results in per_tool for result in results]
 
-    async def write(self, post: str, results: list[ToolResult], point: str) -> str:
-        """The text of the comment, built around `point`: the reason the decide call gave for commenting."""
-        # The instructions are the system prompt. The post, the tool results and the point (model output shaped by
-        # both) are content, so they stay out of it.
+    async def write(self, view: str, place: int, results: list[ToolResult], point: str) -> str:
+        """The text of the comment at `place`, built around `point`: the point the decide call gave for that place.
+        `view` is what the agent reads there: the overview of the post for a top-level comment, or the thread of the
+        comment a reply answers."""
+        # The instructions are the system prompt. The discussion, the tool results and the point (model output shaped
+        # by both) are content, so they stay out of it.
+        where = "a top-level comment on the post" if place == POST else f"a reply to #{place}"
+        content = f"{view}\n\n{_tool_report(results)}\n\nYour comment: {where}.\nYour point: {point}"
         request = LLMRequest(
             tier=ModelTier.STRONG,
             system=self._write_prompt.render(display_name=self._role.display_name, question=self._role.question),
-            messages=[Message(role="user", content=f"Post: {post}\n\n{_tool_report(results)}\n\nYour point: {point}")],
+            messages=[Message(role="user", content=content)],
             max_tokens=self._write_max_tokens,
             prompt_id=self._write_prompt.id,
         )
