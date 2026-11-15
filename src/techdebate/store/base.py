@@ -6,7 +6,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol
 
-from techdebate.models import Message, Notification, NotificationOutcome, User, UserKind
+from techdebate.models import LLMCall, Message, Notification, NotificationOutcome, Research, User, UserKind
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,20 @@ class StoreOps(Protocol):
 
     async def close_notifications(self, notification_ids: Sequence[str], outcome: NotificationOutcome) -> None:
         """Closes the ones still pending, now. A closed notification keeps its first outcome."""
+        ...
+
+    async def add_llm_call(self, call: LLMCall) -> None: ...
+
+    async def list_llm_calls(self, post_id: str) -> list[LLMCall]:
+        """Every AI call made on the post, by any agent."""
+        ...
+
+    async def add_research(self, research: Research) -> None:
+        """An agent researches a post once: a second save for the same agent and post is a bug, and raises."""
+        ...
+
+    async def get_research(self, agent_id: str, post_id: str) -> Research | None:
+        """None when the agent has not researched the post."""
         ...
 
 

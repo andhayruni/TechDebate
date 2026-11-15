@@ -9,12 +9,13 @@ import pytest
 import respx
 from pydantic import HttpUrl
 
-from techdebate.analyst import Analyst, ToolResult
+from techdebate.analyst import Analyst
 from techdebate.config import Settings
 from techdebate.errors import LLMError, NotFoundError, PromptError, ToolError
 from techdebate.llm import FakeLLM, LLMClient, ModelTier
-from techdebate.models import Evidence, ResearchPlan, SpeakDecision
+from techdebate.models import Evidence, Message, Research, ResearchPlan, SpeakDecision, ToolResult, User, UserKind
 from techdebate.roles import ROLE_SPECS, RoleSpec
+from techdebate.store import Store
 from techdebate.tools import ToolInput, ToolRegistry, default_tools, make_http_client
 
 
@@ -514,3 +515,36 @@ async def test_a_real_outage_reads_as_a_failure(respx_mock: respx.MockRouter) ->
         results = await analyst.gather(_HTTPX)
 
     assert results[2] == ToolResult(tool="pypi", query="httpx", failed=True)
+
+
+@pytest.mark.usefixtures("mock_github")
+async def test_saved_results_give_the_decide_call_the_same_report_as_fresh_ones(
+    respx_mock: respx.MockRouter, store: Store
+) -> None:
+    """Every outcome, with real evidence: the agent reads its research back on later notifications."""
+    respx_mock.get(host="pypi.org", path="/pypi/httpx/json").respond(500)  # the tool failed
+    respx_mock.get(host="api.github.com", path="/repos/no/such-repo").respond(404)  # no information found
+    me = User(username="me", kind=UserKind.REAL)
+    developer = User(username="developer", kind=UserKind.AGENT)
+    post = Message(author_id=me.id, text="What do you think about httpx?")
+    for user in (me, developer):
+        await store.add_user(user)
+    await store.add_message(post)
+    llm = _decides(_PASS)
+    settings = _settings()
+
+    async with make_http_client(settings) as client:
+        analyst = Analyst(ROLE_SPECS[0], llm, default_tools(settings, client), settings)
+        fresh = await analyst.gather({"github_search": ["httpx"], "github_repo": ["no/such-repo"], "pypi": ["httpx"]})
+    fresh.append(ToolResult(tool="unused", query=None))
+    await store.add_research(Research(agent_id=developer.id, post_id=post.id, results=fresh))
+    saved = await store.get_research(developer.id, post.id)
+    assert saved is not None
+    await analyst.decide(post.text, fresh)
+    await analyst.decide(post.text, saved.results)
+
+    assert saved.results == fresh
+    assert {bool(r.evidence) for r in fresh} == {True, False}
+    assert any(r.failed for r in fresh)
+    [from_fresh, from_saved] = [request.messages[0].content for request in llm.calls]
+    assert from_saved == from_fresh
