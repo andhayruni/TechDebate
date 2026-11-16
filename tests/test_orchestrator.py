@@ -269,6 +269,36 @@ async def test_every_notification_on_a_post_is_handled_in_one_visit_oldest_post_
     assert all(n.outcome is NotificationOutcome.PASSED for n in await world.notifications("developer"))
 
 
+def _researching_go(request: LLMRequest) -> bool:
+    return request.prompt_id == "research.v1" and "Post by me:\nGo" in request.messages[0].content
+
+
+async def test_research_is_kept_apart_per_post(store: Store) -> None:
+    tool = _StubTool()
+    world = await _world(store, tool=tool)
+    rust = await world.post("Rust")
+    go = await world.post("Go")
+    go_research = ResearchPlan(speak=True, queries={"stub": ["go lang"]}, reason="In my area.")
+    rules: list[tuple[Predicate, Reply]] = [(_researching_go, go_research), *_comments("developer")]
+    await world.loop(FakeLLM(rules=rules)).run()  # one visit per post, each researching it
+    assert tool.queries == ["rust lang", "go lang"]
+
+    developer = world.agents["developer"].id
+    for post, query in ((rust, "rust lang"), (go, "go lang")):
+        research = await store.get_research(developer, post.id)
+        assert research is not None
+        assert [result.query for result in research.results] == [query]
+
+    # A mention on the first post later goes straight to the decide call with that post's research, not the other's.
+    await world.reply(rust, "@developer and the crates?")
+    llm = FakeLLM(rules=[_decides("developer", _PASS)])
+    await world.loop(llm).run()
+    assert _calls(llm, "developer") == ["decide.v1"]
+    assert "rust lang" in llm.calls[0].messages[0].content
+    assert "go lang" not in llm.calls[0].messages[0].content
+    assert tool.queries == ["rust lang", "go lang"]
+
+
 # Limits
 
 

@@ -5,7 +5,7 @@ import pytest
 from techdebate.config import Settings
 from techdebate.models import Message, User, UserKind
 from techdebate.tree import Tree
-from techdebate.views import _cut, overview_for, thread_for  # pyright: ignore[reportPrivateUsage]
+from techdebate.views import cut, overview_for, thread_for
 
 ME = User(username="me", kind=UserKind.REAL)
 DEVELOPER = User(username="developer", kind=UserKind.AGENT)
@@ -79,7 +79,7 @@ def test_replies_are_cut_and_the_post_and_top_level_comments_are_not() -> None:
     assert tree.post.text in overview
     assert top.text in overview
     assert reply.text not in overview
-    assert _cut(reply.text, LIMIT) in overview
+    assert cut(reply.text, LIMIT) in overview
 
 
 def test_a_comment_in_full_is_not_cut() -> None:
@@ -151,7 +151,7 @@ def test_a_comment_from_another_post_has_no_thread() -> None:
 def test_a_reply_at_the_limit_is_shown_as_written() -> None:
     text = "a" * (LIMIT - 1) + "b"
 
-    assert _cut(text, LIMIT) == text
+    assert cut(text, LIMIT) == text
 
 
 @pytest.mark.parametrize(
@@ -168,7 +168,7 @@ def test_a_reply_at_the_limit_is_shown_as_written() -> None:
     ],
 )
 def test_a_long_reply_is_cut_at_a_word_boundary(text: str, limit: int, expected: str) -> None:
-    assert _cut(text, limit) == expected
+    assert cut(text, limit) == expected
 
 
 def test_overview_reply_chars_defaults_to_300() -> None:
