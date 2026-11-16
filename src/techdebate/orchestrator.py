@@ -84,6 +84,16 @@ class AgentLoop:
         for role in roles.roles():
             Analyst(role, llm, tools, settings)
 
+    @property
+    def roles(self) -> list[RoleSpec]:
+        """The agents' roles, in registry order."""
+        return self._roles.roles()
+
+    @property
+    def agents(self) -> Mapping[str, User]:
+        """Each role's agent user, by role name."""
+        return self._agents
+
     async def run(self, on_visit: Callable[[Visit], None] | None = None) -> list[Visit]:
         """Runs the agents in rounds until no agent has a pending notification, and returns every visit in the order
         they ended. A round starts a worker for each agent with pending notifications, and each worker makes visits
@@ -98,7 +108,8 @@ class AgentLoop:
                     on_visit(visit)
 
         while waiting := [role for role in self._roles.roles() if await self._pending(role)]:
-            # An unexpected error is a bug: it cancels the other workers and goes up.
+            # A visit closes its notifications whatever goes wrong in it, so only an error outside one, such as the
+            # database failing, reaches here: it cancels the other workers and goes up.
             async with asyncio.TaskGroup() as group:
                 for role in waiting:
                     group.create_task(work(role))
@@ -157,6 +168,9 @@ class AgentLoop:
             acted.outcome, acted.reason = NotificationOutcome.FAILED, str(e)
         except BudgetExceeded as e:
             acted.outcome, acted.reason = NotificationOutcome.BUDGET, str(e)
+        except Exception as e:  # a bug: logged with its traceback, without ending the worker or the other agents
+            log.exception("visit failed unexpectedly post_id=%s agent=%s", post_id, role.name)
+            acted.outcome, acted.reason = NotificationOutcome.FAILED, f"unexpected error: {e!r}"
         await self._store.close_notifications([n.id for n in active], acted.outcome)
 
         comments: tuple[int, ...] = ()
@@ -239,6 +253,10 @@ class AgentLoop:
             text = await analyst.write(view, item.place, results, item.point)
             acted.written.append(await self._forum.create_comment(agent, parent.id, text))
             acted.outcome = NotificationOutcome.COMMENTED
+
+    async def has_pending(self, role: RoleSpec) -> bool:
+        """Whether the agent has a notification to act on."""
+        return bool(await self._pending(role))
 
     async def _pending(self, role: RoleSpec) -> list[Notification]:
         return await self._store.list_notifications(self._agents[role.name].id)

@@ -275,6 +275,17 @@ async def test_unknown_repo_raises_tool_error(
         await _repo(client).run(GitHubRepoInput(query="nope/missing"))
 
 
+@pytest.mark.parametrize("query", ["../..", "./x", "owner/..", "../rust", "owner/."])
+async def test_dot_name_parts_are_refused_without_a_request(
+    client: httpx.AsyncClient, respx_mock: respx.MockRouter, query: str
+) -> None:
+    # No route is mocked, so any request would fail the test.
+    with pytest.raises(NotFoundError, match="invalid repository name"):
+        await _repo(client).run(GitHubRepoInput(query=query))
+
+    assert not respx_mock.calls
+
+
 async def test_keywords_resolve_to_the_top_search_hit(
     client: httpx.AsyncClient, respx_mock: respx.MockRouter, load_fixture: Fixture
 ) -> None:

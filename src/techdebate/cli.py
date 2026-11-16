@@ -2,13 +2,16 @@
 
 `techdebate post`, `posts`, `comment`, `reply`, `show` and `notifications` take part in the discussions stored in the
 database, as the user in `username`. A post is named by its short ID, the start of its ID, and the commands that work on
-one post take `--post`. `techdebate run` lets the agents act on their notifications until none is pending,
-`techdebate ask "<question>"` checks the LLM setup, and `techdebate evidence <tool> "<query>"` runs one evidence tool.
+one post take `--post`. `techdebate run` lets the agents act on their notifications until none is pending, and
+`techdebate agents` keeps them running until Ctrl-C. `techdebate ask "<question>"` checks the LLM setup, and
+`techdebate evidence <tool> "<query>"` runs one evidence tool.
 """
 
 import argparse
 import asyncio
 import logging
+import os
+import signal
 import sys
 import textwrap
 from collections.abc import AsyncGenerator
@@ -25,6 +28,7 @@ from techdebate.models import Evidence, Message, Notification, NotificationOutco
 from techdebate.orchestrator import AgentLoop, Visit
 from techdebate.prompts import load_prompt
 from techdebate.roles import RoleRegistry, default_roles
+from techdebate.runner import AgentRunner, agents_lock
 from techdebate.store import Store, open_store
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
 from techdebate.tree import Tree
@@ -168,19 +172,70 @@ async def _show_command(settings: Settings, post_ref: str | None = None) -> tupl
         return post, _format_discussion(tree, users), len(tree.comments)
 
 
+def _agent_loop(session: _Session, settings: Settings) -> AgentLoop:
+    return AgentLoop(
+        session.store,
+        session.forum,
+        session.agents,
+        llm=_make_llm(),
+        roles=session.roles,
+        tools=session.tools,
+        settings=settings,
+    )
+
+
+def _print_visit(visit: Visit) -> None:
+    print(_visit_line(visit), flush=True)
+
+
 async def _run_command(settings: Settings) -> list[Visit]:
     """Lets the agents act until no notification is pending, printing one line per visit as it ends."""
     async with _session(settings) as session:
-        loop = AgentLoop(
-            session.store,
-            session.forum,
-            session.agents,
-            llm=_make_llm(),
-            roles=session.roles,
-            tools=session.tools,
-            settings=settings,
-        )
-        return await loop.run(on_visit=lambda visit: print(_visit_line(visit), flush=True))
+        with agents_lock(settings):
+            return await _agent_loop(session, settings).run(on_visit=_print_visit)
+
+
+def _full_path(path: str) -> str:
+    return os.path.abspath(path)
+
+
+# How the agents command is stopped: the first signal lets the visits in progress finish, and a second ends them.
+_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+async def _agents_command(settings: Settings) -> tuple[list[Visit], bool]:
+    """Keeps the agents running, printing one line per visit as it ends, until Ctrl-C or SIGTERM. Returns the visits,
+    and whether a second signal cut the visits in progress short."""
+    async with _session(settings) as session:
+        with agents_lock(settings):
+            runner = AgentRunner(_agent_loop(session, settings), poll_s=settings.agent_poll_s, on_visit=_print_visit)
+            session.forum.subscribe(runner.wake)
+            stop = asyncio.Event()
+            forced = False
+
+            def on_signal() -> None:
+                nonlocal forced
+                if not stop.is_set():
+                    busy = runner.in_progress
+                    waiting = f": waiting for {busy} visit{'' if busy == 1 else 's'} in progress" if busy else ""
+                    print(f"stopping{waiting} (Ctrl-C again to stop now)", file=sys.stderr, flush=True)
+                    stop.set()
+                else:
+                    forced = True
+                    runner.cancel()
+
+            loop = asyncio.get_running_loop()
+            for sig in _STOP_SIGNALS:
+                loop.add_signal_handler(sig, on_signal)
+            try:
+                print(f"agents running on {_full_path(settings.db_path)} (Ctrl-C to stop)", file=sys.stderr, flush=True)
+                await runner.start()
+                await stop.wait()
+                await runner.stop()
+            finally:
+                for sig in _STOP_SIGNALS:
+                    loop.remove_signal_handler(sig)
+            return runner.visits, forced
 
 
 def _visit_line(visit: Visit) -> str:
@@ -279,6 +334,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", parents=[common], help="Let the agents act on their notifications until none is pending")
+    sub.add_parser(
+        "agents", parents=[common], help="Keep the agents running, acting on notifications as they arrive, until Ctrl-C"
+    )
     ask_cmd = sub.add_parser("ask", parents=[common], help="Ask the model one question (checks the API key and client)")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--tier", choices=[t.value for t in ModelTier], default=ModelTier.CHEAP.value)
@@ -312,10 +370,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run(args: argparse.Namespace) -> None:
     if args.command == "run":
-        visits = asyncio.run(_run_command(get_settings()))
-        comments = sum(len(visit.comments) for visit in visits)
-        cost = sum(visit.cost_usd for visit in visits)
-        print(f"visits={len(visits)} comments={comments} cost=${cost:.6f}", file=sys.stderr)
+        _print_summary(asyncio.run(_run_command(get_settings())))
+    if args.command == "agents":
+        visits, forced = asyncio.run(_agents_command(get_settings()))
+        if forced:
+            raise KeyboardInterrupt
+        _print_summary(visits)
     if args.command == "ask":
         response = asyncio.run(ask(_make_llm(), args.question, ModelTier(args.tier)))
         print(response.text)
@@ -348,6 +408,12 @@ def _run(args: argparse.Namespace) -> None:
     if args.command == "notifications":
         count = asyncio.run(_notifications_command(get_settings(), include_closed=args.all, post_ref=args.post))
         print(f"notifications={count}", file=sys.stderr)
+
+
+def _print_summary(visits: list[Visit]) -> None:
+    comments = sum(len(visit.comments) for visit in visits)
+    cost = sum(visit.cost_usd for visit in visits)
+    print(f"visits={len(visits)} comments={comments} cost=${cost:.6f}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:

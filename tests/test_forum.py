@@ -1,8 +1,13 @@
+import sqlite3
+from collections.abc import Sequence
+from contextlib import closing
+from pathlib import Path
+
 import pytest
 
 from techdebate.errors import ForumError, TechDebateError
 from techdebate.forum import Forum
-from techdebate.models import Message, NotificationOutcome, NotificationReason, User, UserKind
+from techdebate.models import Message, Notification, NotificationOutcome, NotificationReason, User, UserKind
 from techdebate.store import Store
 from techdebate.tree import Tree
 
@@ -204,3 +209,56 @@ async def test_an_agent_outside_the_registry_is_not_notified(store: Store) -> No
     await forum.create_post(me, "Is Go growing?")
 
     assert await store.list_notifications(retired.id) == []
+
+
+# Listeners
+
+
+async def test_listeners_hear_of_each_saved_message_and_its_notifications_after_the_commit(
+    store: Store, db_path: Path
+) -> None:
+    forum, me, developer = await _setup(store)
+    heard: list[tuple[str, list[str], bool]] = []
+
+    def listener(message: Message, notifications: Sequence[Notification]) -> None:
+        # A connection of its own sees the message only once its transaction has committed.
+        with closing(sqlite3.connect(db_path)) as db:
+            committed = db.execute("SELECT 1 FROM messages WHERE id = ?", (message.id,)).fetchone() is not None
+        heard.append((message.text, [n.user_id for n in notifications], committed))
+
+    forum.subscribe(listener)
+
+    post = await forum.create_post(me, "Is Rust growing?")
+    await forum.create_comment(developer, post.id, "Yes.")
+
+    assert heard == [("Is Rust growing?", [developer.id], True), ("Yes.", [me.id], True)]
+
+
+async def test_a_listener_that_raises_is_logged_and_the_others_still_hear(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    forum, me, _ = await _setup(store)
+    heard: list[str] = []
+
+    def broken(message: Message, notifications: Sequence[Notification]) -> None:
+        raise RuntimeError("broken listener")
+
+    forum.subscribe(broken)
+    forum.subscribe(lambda message, notifications: heard.append(message.text))
+
+    post = await forum.create_post(me, "Is Rust growing?")
+
+    assert heard == ["Is Rust growing?"]
+    assert await store.get_message(post.id) == post
+    assert "forum listener failed" in caplog.text and "broken listener" in caplog.text
+
+
+async def test_a_refused_write_tells_no_listener(store: Store) -> None:
+    forum, me, _ = await _setup(store)
+    heard: list[str] = []
+    forum.subscribe(lambda message, notifications: heard.append(message.text))
+
+    with pytest.raises(ForumError):
+        await forum.create_post(me, "   ")
+
+    assert heard == []

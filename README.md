@@ -30,13 +30,20 @@ short ID, which `posts` lists. `comment`, `reply` and `show` work on the newest 
 uv run techdebate post "Is Rust growing?"   # create a post
 uv run techdebate posts                     # the posts, newest first, with their short IDs
 uv run techdebate run                       # the agents act on their notifications until none is left
+uv run techdebate agents                    # or keep them running, acting as notifications arrive (Ctrl-C stops)
 uv run techdebate comment "I think so."     # a top-level comment on the newest post
 uv run techdebate reply 1 "Source?"         # a reply to comment #1
 uv run techdebate show --post 3f2a          # a post and its threads
 uv run techdebate notifications             # what's new for me on every post, marked as seen (--all: the seen ones too)
 ```
 
-Delete the database file to start over.
+`agents` keeps running in its own terminal while you post and comment from another: the agents pick up what you
+write within a few seconds (`TECHDEBATE_AGENT_POLL_S`), and each other's comments at once. The first Ctrl-C lets the
+visits in progress finish, and a second stops at once; what they were handling is picked up next time. Only one
+`run` or `agents` works on a database at a time.
+
+To start over, delete `techdebate.db` together with any `techdebate.db-*` files next to it: after a crash, SQLite
+can leave a journal there that it would apply to a new database of the same name.
 
 The database (`techdebate.db`, or `TECHDEBATE_DB_PATH`) is created and migrated whenever techdebate opens it.
 To write a new migration after changing `src/techdebate/store/tables.py`:
