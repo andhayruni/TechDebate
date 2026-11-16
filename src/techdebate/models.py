@@ -108,9 +108,13 @@ class NotificationReason(StrEnum):
 
 
 class NotificationOutcome(StrEnum):
-    """How a notification was closed. The agents' outcomes are added with the agent loop."""
+    """How a notification was closed: listed by a real user, or what an agent's visit did with it."""
 
     SEEN = "seen"  # a real user listed it
+    COMMENTED = "commented"  # the agent wrote at least one comment
+    PASSED = "passed"  # the agent looked, and had nothing new to add
+    LIMIT = "limit"  # its thread is full for the agent, or no place on the post is open to it
+    FAILED = "failed"  # an AI call failed during the visit
 
 
 class Notification(BaseModel):

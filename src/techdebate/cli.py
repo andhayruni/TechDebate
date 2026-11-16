@@ -1,9 +1,8 @@
 """Command-line entry point.
 
 `techdebate post`, `comment`, `reply`, `show` and `notifications` take part in the discussion stored in the database, as
-the user in `username`. `techdebate run "<text>"` makes a post in memory, lets the agents comment on it and prints
-both, `techdebate ask "<question>"` checks the LLM setup, and `techdebate evidence <tool> "<query>"` runs one evidence
-tool.
+the user in `username`. `techdebate run` lets the agents act on their notifications until none is pending,
+`techdebate ask "<question>"` checks the LLM setup, and `techdebate evidence <tool> "<query>"` runs one evidence tool.
 """
 
 import argparse
@@ -18,17 +17,17 @@ from dataclasses import dataclass
 from techdebate.config import Settings, get_settings
 from techdebate.errors import CommandError, TechDebateError
 from techdebate.forum import Forum
-from techdebate.llm import AnthropicLLM, CostMeter, LLMClient, LLMRequest, LLMResponse, ModelTier
+from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, LLMResponse, ModelTier
 from techdebate.llm import Message as LLMMessage
 from techdebate.logging_setup import setup_logging
-from techdebate.models import Evidence, Message, Notification, NotificationOutcome, NotificationReason, User, UserKind
-from techdebate.orchestrator import check_post
+from techdebate.models import Evidence, Message, Notification, NotificationOutcome, NotificationReason, User
+from techdebate.orchestrator import AgentLoop, Visit
 from techdebate.prompts import load_prompt
-from techdebate.roles import default_roles
+from techdebate.roles import RoleRegistry, default_roles
 from techdebate.store import Store, open_store
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
 from techdebate.tree import Tree
-from techdebate.users import check_username, shown_name, sync_users
+from techdebate.users import shown_name, sync_users
 
 log = logging.getLogger(__name__)
 
@@ -63,22 +62,6 @@ async def _evidence_command(tool_name: str, query: str) -> list[Evidence]:
         return await evidence(default_tools(settings, client), tool_name, query)
 
 
-async def _run_command(text: str, meter: CostMeter) -> tuple[Message, list[Message], dict[str, User]]:
-    """The post, its comments, and every user by ID. The users exist only in memory for now."""
-    settings = get_settings()
-    me = User(username=check_username(settings.username), kind=UserKind.REAL)
-    post = Message(author_id=me.id, text=text)
-    async with make_http_client(settings) as client:
-        tools = default_tools(settings, client)
-        roles = default_roles(tools)
-        agents = {role.name: User(username=role.name, kind=UserKind.AGENT) for role in roles.roles()}
-        comments = await check_post(
-            post, author=me, agents=agents, llm=meter, roles=roles, tools=tools, settings=settings
-        )
-    users = {user.id: user for user in (me, *agents.values())}
-    return post, comments, users
-
-
 # The discussion in the database
 
 
@@ -86,19 +69,28 @@ async def _run_command(text: str, meter: CostMeter) -> tuple[Message, list[Messa
 class _Session:
     store: Store
     me: User  # the real user in `username`, who writes from the command line
+    agents: dict[str, User]  # by role name, in registry order
     forum: Forum
+    roles: RoleRegistry
+    tools: ToolRegistry
 
 
 @asynccontextmanager
 async def _session(settings: Settings) -> AsyncGenerator[_Session]:
-    """The store, with the users synced to the role registry that `run` builds, and the forum that notifies its
-    agents."""
-    async with open_store(settings) as store:
-        # The tools are only built to learn which roles are available: no request is made.
-        async with make_http_client(settings) as client:
-            roles = default_roles(default_tools(settings, client))
+    """The store, with the users synced to the role registry, the forum that notifies its agents, and the tools. The
+    HTTP client stays open for the whole command, so `run` can use the tools; the other commands make no request."""
+    async with open_store(settings) as store, make_http_client(settings) as client:
+        tools = default_tools(settings, client)
+        roles = default_roles(tools)
         users = await sync_users(store, roles, settings.username)
-        yield _Session(store=store, me=users.me, forum=Forum(store, users.agents.values()))
+        yield _Session(
+            store=store,
+            me=users.me,
+            agents=users.agents,
+            forum=Forum(store, users.agents.values()),
+            roles=roles,
+            tools=tools,
+        )
 
 
 async def _the_post(store: Store) -> Tree:
@@ -141,6 +133,35 @@ async def _show_command(settings: Settings) -> tuple[str, int]:
         tree = await _the_post(session.store)
         users = {user.id: user for user in await session.store.list_users()}
         return _format_discussion(tree, users), len(tree.comments)
+
+
+async def _run_command(settings: Settings) -> list[Visit]:
+    """Lets the agents act until no notification is pending, printing one line per visit as it ends."""
+    async with _session(settings) as session:
+        loop = AgentLoop(
+            session.store,
+            session.forum,
+            session.agents,
+            llm=_make_llm(),
+            roles=session.roles,
+            tools=session.tools,
+            settings=settings,
+        )
+        return await loop.run(on_visit=lambda visit: print(_visit_line(visit), flush=True))
+
+
+def _visit_line(visit: Visit) -> str:
+    """Who made the visit, and what it did, in one line."""
+    name = shown_name(visit.agent)
+    numbers = ", ".join(f"#{n}" for n in visit.comments)
+    if visit.outcome is NotificationOutcome.COMMENTED:
+        return f"{name} commented: {numbers}"
+    if visit.outcome is NotificationOutcome.PASSED:
+        return f"{name} passed{' at research' if visit.at_research else ''}: {visit.reason}"
+    if visit.outcome is NotificationOutcome.LIMIT:
+        return f"{name} at its limit: {visit.reason}"
+    after = f" after writing {numbers}" if visit.comments else ""
+    return f"{name} failed{after}: {visit.reason}"
 
 
 def _format_discussion(tree: Tree, users: dict[str, User]) -> str:
@@ -218,8 +239,7 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
 
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", parents=[common], help="Write a post and let every agent comment on it")
-    run.add_argument("text", help="The text of the post")
+    sub.add_parser("run", parents=[common], help="Let the agents act on their notifications until none is pending")
     ask_cmd = sub.add_parser("ask", parents=[common], help="Ask the model one question (checks the API key and client)")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--tier", choices=[t.value for t in ModelTier], default=ModelTier.CHEAP.value)
@@ -245,10 +265,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run(args: argparse.Namespace) -> None:
     if args.command == "run":
-        meter = CostMeter(_make_llm())
-        post, comments, users = asyncio.run(_run_command(args.text, meter))
-        print(_format_discussion(Tree(post, comments), users))
-        print(f"comments={len(comments)} cost=${meter.total_usd:.6f}", file=sys.stderr)
+        visits = asyncio.run(_run_command(get_settings()))
+        comments = sum(len(visit.comments) for visit in visits)
+        cost = sum(visit.cost_usd for visit in visits)
+        print(f"visits={len(visits)} comments={comments} cost=${cost:.6f}", file=sys.stderr)
     if args.command == "ask":
         response = asyncio.run(ask(_make_llm(), args.question, ModelTier(args.tier)))
         print(response.text)
