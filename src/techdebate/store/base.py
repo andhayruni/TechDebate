@@ -58,6 +58,10 @@ class StoreOps(Protocol):
         """Every AI call made on the post, by any agent."""
         ...
 
+    async def spent_usd(self, *, post_id: str) -> float:
+        """The cost of the stored AI calls on the post, by any agent: 0 with none."""
+        ...
+
     async def add_research(self, research: Research) -> None:
         """An agent researches a post once: a second save for the same agent and post is a bug, and raises."""
         ...

@@ -161,6 +161,8 @@ def _visit_line(visit: Visit) -> str:
     if visit.outcome is NotificationOutcome.LIMIT:
         return f"{name} at its limit: {visit.reason}"
     after = f" after writing {numbers}" if visit.comments else ""
+    if visit.outcome is NotificationOutcome.BUDGET:
+        return f"{name} out of budget{after}: {visit.reason}"
     return f"{name} failed{after}: {visit.reason}"
 
 

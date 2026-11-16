@@ -12,7 +12,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from pydantic import TypeAdapter
-from sqlalchemy import Connection, event, or_, select, update
+from sqlalchemy import Connection, event, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from techdebate.config import Settings
@@ -144,6 +144,10 @@ class _SessionOps:
         query = select(LLMCallRow).where(LLMCallRow.post_id == post_id).order_by(LLMCallRow.seq)
         return [_llm_call(row) for row in await self._session.scalars(query)]
 
+    async def spent_usd(self, *, post_id: str) -> float:
+        query = select(func.coalesce(func.sum(LLMCallRow.cost_usd), 0.0)).where(LLMCallRow.post_id == post_id)
+        return float(await self._session.scalar(query) or 0.0)
+
     async def add_research(self, research: Research) -> None:
         results = _RESULTS.dump_json(research.results).decode()
         self._session.add(ResearchRow(**research.model_dump(exclude={"results"}), results=results))
@@ -221,6 +225,10 @@ class SqliteStore:
     async def list_llm_calls(self, post_id: str) -> list[LLMCall]:
         async with self._read() as ops:
             return await ops.list_llm_calls(post_id)
+
+    async def spent_usd(self, *, post_id: str) -> float:
+        async with self._read() as ops:
+            return await ops.spent_usd(post_id=post_id)
 
     async def add_research(self, research: Research) -> None:
         async with self.transaction() as tx:

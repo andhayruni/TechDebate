@@ -115,6 +115,7 @@ class NotificationOutcome(StrEnum):
     PASSED = "passed"  # the agent looked, and had nothing new to add
     LIMIT = "limit"  # its thread is full for the agent, or no place on the post is open to it
     FAILED = "failed"  # an AI call failed during the visit
+    BUDGET = "budget"  # a budget that covers the agent's calls on the post is used up
 
 
 class Notification(BaseModel):

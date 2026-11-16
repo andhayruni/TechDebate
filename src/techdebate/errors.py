@@ -40,4 +40,10 @@ class CommandError(TechDebateError):
 
 
 class BudgetExceeded(TechDebateError):
-    """A spending cap was reached."""
+    """A spending cap was reached: what the scope (such as "post") has spent, against its limit."""
+
+    def __init__(self, scope: str, spent_usd: float, limit_usd: float) -> None:
+        super().__init__(f"the {scope} has spent ${spent_usd:.4f} of its ${limit_usd:.2f} budget")
+        self.scope = scope
+        self.spent_usd = spent_usd
+        self.limit_usd = limit_usd

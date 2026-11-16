@@ -65,8 +65,7 @@ class AnthropicLLM:
         return self._response(message, model, request)
 
     def _response(self, message: AnthropicMessage, requested_model: str, request: LLMRequest) -> LLMResponse:
-        # Priced by the model we asked for, reported as the one that answered.
-        model = message.model
+        model = message.model  # the model that answered
         if message.stop_reason == "refusal":
             category = message.stop_details.category if message.stop_details else None
             raise LLMError(f"{model} refused the request (category: {category or 'unspecified'})")
@@ -85,10 +84,18 @@ class AnthropicLLM:
             log.warning("llm output truncated model=%s max_tokens reached", model)
 
         usage = Usage(input_tokens=message.usage.input_tokens, output_tokens=message.usage.output_tokens)
-        cost = cost_usd(usage, self._prices[requested_model])
+        cost = cost_usd(usage, self._price(requested_model, model))
         return LLMResponse(
             text=text, parsed=parsed, usage=usage, cost_usd=cost, model=model, prompt_id=request.prompt_id
         )
+
+    def _price(self, requested_model: str, answered_model: str) -> ModelPrice:
+        """The answering model's price. When it has none, the requested model's, which always has one: the call is
+        already paid for, so it is not failed."""
+        if answered_model in self._prices:
+            return self._prices[answered_model]
+        log.warning("llm priced by the requested model requested=%s answered=%s", requested_model, answered_model)
+        return self._prices[requested_model]
 
 
 def _const_to_enum(node: Any) -> Any:
