@@ -1107,11 +1107,19 @@ def test_the_first_ctrl_c_lets_the_visit_in_progress_finish(
     assert _pending_agent_notifications(db_path) == []
 
 
-def test_a_second_ctrl_c_stops_at_once_and_leaves_the_visit_pending(
+def test_a_second_ctrl_c_stops_at_once_and_leaves_the_visits_in_progress_pending(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    ended: list[Visit] = []
+    print_visit = cli._print_visit  # pyright: ignore[reportPrivateUsage]
+
+    def counted(visit: Visit) -> None:
+        print_visit(visit)
+        ended.append(visit)
+
     class _Interrupted(FakeLLM):
-        """Ctrl-C twice while the Developer writes, a write that would take far too long."""
+        """Ctrl-C twice while the Developer writes, a write that would take far too long. The Pollster's and the
+        Scientist's visits may or may not have ended by then."""
 
         async def generate(self, request: LLMRequest) -> LLMResponse:
             if _is_write(request):
@@ -1124,6 +1132,7 @@ def test_a_second_ctrl_c_stops_at_once_and_leaves_the_visit_pending(
     db_path = _use_db(monkeypatch, tmp_path)
     cli.main(["post", "Is Rust growing?"])
     monkeypatch.setattr(cli, "_make_llm", lambda: _Interrupted(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
+    monkeypatch.setattr(cli, "_print_visit", counted)
     capsys.readouterr()
 
     with pytest.raises(SystemExit) as exc:
@@ -1131,7 +1140,11 @@ def test_a_second_ctrl_c_stops_at_once_and_leaves_the_visit_pending(
 
     assert exc.value.code == 130
     assert capsys.readouterr().err.splitlines()[-1] == "interrupted"
-    assert _pending_agent_notifications(db_path) == ["developer"]  # handled next time
+    # Every visit cut short leaves its notification pending, to be handled next time: always the Developer's, and
+    # the Pollster's or the Scientist's if it was still in progress.
+    cut_short = {"developer", "pollster", "scientist"} - {visit.agent.username for visit in ended}
+    assert "developer" in cut_short
+    assert set(_pending_agent_notifications(db_path)) == cut_short
 
 
 def _pending_agent_notifications(db_path: Path) -> list[str]:
