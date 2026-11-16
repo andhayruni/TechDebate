@@ -200,17 +200,19 @@ def test_a_whole_discussion(
 
     # I post, and the agents look: two research and comment, and one passes. The Scientist's #2 notifies the
     # Developer, and the two answer each other until the Scientist's thread is full.
-    assert _command(capsys, "post", "httpx")[0] == ""
+    out, err = _command(capsys, "post", "httpx")
+    assert out == ""
+    post = err.removeprefix("post=").removesuffix("\n")  # the short ID that starts every line about the post
     out, err = _command(capsys, "run")
 
     assert sorted(out.splitlines()) == [
-        "Developer [AI] commented: #1",
-        "Developer [AI] commented: #3",
-        "Developer [AI] commented: #5",
-        "Pollster [AI] passed at research: Not a public topic.",
-        "Scientist [AI] at its limit: thread #2 is full",
-        "Scientist [AI] commented: #2",
-        "Scientist [AI] commented: #4",
+        f"{post} Developer [AI] commented: #1",
+        f"{post} Developer [AI] commented: #3",
+        f"{post} Developer [AI] commented: #5",
+        f"{post} Pollster [AI] passed at research: Not a public topic.",
+        f"{post} Scientist [AI] at its limit: thread #2 is full",
+        f"{post} Scientist [AI] commented: #2",
+        f"{post} Scientist [AI] commented: #4",
     ]
     assert err == "visits=7 comments=5 cost=$0.000000\n"  # nothing else, so no tool failed and no role was left out
     first_run = _requests(respx_mock)
@@ -219,12 +221,12 @@ def test_a_whole_discussion(
 
     # I reply in the Developer's thread and mention the Pollster, which takes its first look again and answers. The
     # Developer is notified of both, and passes. Its notifications can come in one visit or two, so the lines are a set.
-    assert _command(capsys, "reply", "1", _TEXT[6]) == ("", "comment=#6\n")
+    assert _command(capsys, "reply", "1", _TEXT[6]) == ("", f"post={post} comment=#6\n")
     out, err = _command(capsys, "run")
 
     assert set(out.splitlines()) == {
-        "Pollster [AI] commented: #7",
-        "Developer [AI] passed: The question is for the Pollster.",
+        f"{post} Pollster [AI] commented: #7",
+        f"{post} Developer [AI] passed: The question is for the Pollster.",
     }
     assert err.endswith(" comments=1 cost=$0.000000\n")
     second_run = _requests(respx_mock)
@@ -261,12 +263,12 @@ def test_a_whole_discussion(
         "    #5 Developer [AI], replying to #4:\n"
         f"    {_TEXT[5]}\n"
     )
-    assert err == "comments=7\n"
+    assert err == f"post={post} comments=7\n"
     out, err = _command(capsys, "notifications")
     assert out == (
-        f"#1 Developer [AI] commented on your post:\n{_TEXT[1]}\n\n"
-        f"#2 Scientist [AI] commented on your post:\n{_TEXT[2]}\n\n"
-        f"#7 Pollster [AI] replied to #6, in thread #1:\n{_TEXT[7]}\n"
+        f"{post} #1 Developer [AI] commented on your post:\n{_TEXT[1]}\n\n"
+        f"{post} #2 Scientist [AI] commented on your post:\n{_TEXT[2]}\n\n"
+        f"{post} #7 Pollster [AI] replied to #6, in thread #1:\n{_TEXT[7]}\n"
     )
     assert err == "notifications=3\n"
 

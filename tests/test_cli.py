@@ -346,22 +346,38 @@ def _use_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **overrides: Any) -
     return db_path
 
 
-def _write_as(db_path: Path, username: str, text: str, reply_to: int | None = None) -> None:
+def _db_settings(db_path: Path) -> Settings:
+    return Settings(_env_file=None, db_path=str(db_path))  # pyright: ignore[reportCallIssue]
+
+
+def _posts(db_path: Path) -> list[Message]:
+    """The posts, newest first."""
+
+    async def read() -> list[Message]:
+        async with open_store(_db_settings(db_path)) as store:
+            return await store.list_posts()
+
+    return asyncio.run(read())
+
+
+def _write_as(
+    db_path: Path, username: str, text: str, reply_to: int | None = None, post: Message | None = None
+) -> None:
     """Writes a comment as another user, through the forum, as an agent will: a top-level comment, or a reply to
-    comment #reply_to. The user is created as a real user if it does not exist yet."""
+    comment #reply_to, on `post` or on the newest post. The user is created as a real user if it does not exist yet."""
 
     async def write() -> None:
-        async with open_store(Settings(_env_file=None, db_path=str(db_path))) as store:  # pyright: ignore[reportCallIssue]
+        async with open_store(_db_settings(db_path)) as store:
             user = await store.find_user(username)
             if user is None:
                 user = User(username=username, kind=UserKind.REAL)
                 await store.add_user(user)
             developer = await store.find_user("developer")
             assert developer is not None
-            [post] = await store.list_posts()
-            found = await store.get_post(post.id)
+            on = post or (await store.list_posts())[0]
+            found = await store.get_post(on.id)
             assert found is not None
-            parent = post if reply_to is None else found.comments[reply_to - 1]
+            parent = found.post if reply_to is None else found.comments[reply_to - 1]
             await Forum(store, [developer]).create_comment(user, parent.id, text)
 
     asyncio.run(write())
@@ -388,35 +404,44 @@ def test_post_creates_the_post_and_notifies_the_agents(
     out, err = capsys.readouterr()
 
     async def saved() -> tuple[list[Message], list[str]]:
-        async with open_store(Settings(_env_file=None, db_path=str(db_path))) as store:  # pyright: ignore[reportCallIssue]
+        async with open_store(_db_settings(db_path)) as store:
             developer = await store.find_user("developer")
             assert developer is not None
             return await store.list_posts(), [n.reason for n in await store.list_notifications(developer.id)]
 
     [post], reasons = asyncio.run(saved())
-    assert (out, err) == ("", f"post={post.id}\n")
+    assert (out, err) == ("", f"post={post.id[:8]}\n")
     assert post.text == "Is Rust growing?"
     assert reasons == [NotificationReason.NEW_POST]
 
 
-def test_a_second_post_is_refused_and_names_the_database_file(
+def test_posts_lists_every_post_newest_first_with_its_short_id_comments_and_start(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     db_path = _use_db(monkeypatch, tmp_path)
-    cli.main(["post", "Is Rust growing?"])
+    cli.main(["posts"])
+    assert capsys.readouterr() == ("No posts.\n", "posts=0\n")
+
+    cli.main(["post", "Is Rust growing?\nIt has more crates every year."])
+    _write_as(db_path, "developer", "Yes.")
+    cli.main(["post", "Is Go growing? " + "Go is used for cloud tools, and its module count keeps going up."])
+    _write_as(db_path, "developer", "Yes.")
+    _write_as(db_path, "developer", "More.")
+    cli.main(["post", "Is Zig growing?"])
     capsys.readouterr()
 
-    err = _fails(capsys, ["post", "Is Go growing?"])
+    cli.main(["posts"])
 
-    assert err == (
-        "error: there is already a post, and only one is supported for now; "
-        f"delete the database file {db_path} to start over\n"
+    zig, go, rust = (post.id[:8] for post in _posts(db_path))
+    assert capsys.readouterr() == (
+        f"{zig}  0 comments  Is Zig growing?\n"
+        f"{go}  2 comments  Is Go growing? Go is used for cloud tools, and its module…\n"
+        f"{rust}  1 comment  Is Rust growing?\n",
+        "posts=3\n",
     )
-    cli.main(["show"])
-    assert "Is Go growing?" not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("argv", [["comment", "Yes."], ["reply", "1", "Yes."], ["show"]])
+@pytest.mark.parametrize("argv", [["comment", "Yes."], ["reply", "1", "Yes."], ["show"], ["show", "--post", "ab"]])
 def test_a_command_before_any_post_says_how_to_create_one(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, argv: list[str]
 ) -> None:
@@ -444,7 +469,8 @@ def test_show_prints_a_post_without_comments(
 
     cli.main(["show"])
 
-    assert capsys.readouterr() == ("alice:\nIs Rust\ngrowing?\n\n  No comments.\n", "comments=0\n")
+    [post] = _posts(tmp_path / "techdebate.db")
+    assert capsys.readouterr() == ("alice:\nIs Rust\ngrowing?\n\n  No comments.\n", f"post={post.id[:8]} comments=0\n")
 
 
 def test_comment_and_reply_print_the_new_number_and_show_prints_the_nesting(
@@ -459,7 +485,8 @@ def test_comment_and_reply_print_the_new_number_and_show_prints_the_nesting(
     _write_as(db_path, "developer", "GitHub search.", reply_to=2)  # 3, deeper
     cli.main(["reply", "3", "Thanks."])  # 4, deeper still
     cli.main(["comment", "A second thread."])  # 5
-    assert capsys.readouterr().err == "comment=#2\ncomment=#4\ncomment=#5\n"
+    short = _posts(db_path)[0].id[:8]
+    assert capsys.readouterr().err == f"post={short} comment=#2\npost={short} comment=#4\npost={short} comment=#5\n"
 
     cli.main(["show"])
 
@@ -485,7 +512,7 @@ def test_comment_and_reply_print_the_new_number_and_show_prints_the_nesting(
         "  #5 me:\n"
         "  A second thread.\n"
     )
-    assert err == "comments=5\n"
+    assert err == f"post={short} comments=5\n"
 
 
 def test_a_reply_to_an_unknown_number_is_refused_and_saves_nothing(
@@ -496,10 +523,74 @@ def test_a_reply_to_an_unknown_number_is_refused_and_saves_nothing(
     _write_as(db_path, "developer", "Yes.")
     capsys.readouterr()
 
+    short = _posts(db_path)[0].id[:8]
     for number in ("2", "0", "-1"):
-        assert _fails(capsys, ["reply", number, "Source?"]) == f"error: there is no comment #{number} on the post\n"
+        assert _fails(capsys, ["reply", number, "Source?"]) == f"error: there is no comment #{number} on post {short}\n"
     cli.main(["show"])
-    assert capsys.readouterr().err == "comments=1\n"
+    assert capsys.readouterr().err == f"post={short} comments=1\n"
+
+
+def test_comment_reply_and_show_work_on_the_newest_post_or_the_one_given(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    cli.main(["post", "Is Go growing?"])
+    go, rust = _posts(db_path)
+    capsys.readouterr()
+
+    cli.main(["comment", "On the newest."])
+    cli.main(["comment", "--post", rust.id[:4].upper(), "On the older one."])  # any start of the ID, any case
+    cli.main(["reply", "1", "--post", rust.id, "A reply there."])  # the full ID
+    cli.main(["comment", "Newest again."])
+
+    assert capsys.readouterr().err == (
+        f"post={go.id[:8]} comment=#1\npost={rust.id[:8]} comment=#1\n"
+        f"post={rust.id[:8]} comment=#2\npost={go.id[:8]} comment=#2\n"
+    )
+    cli.main(["show", "--post", rust.id[:6]])
+    out, err = capsys.readouterr()
+    assert out == "me:\nIs Rust growing?\n\n  #1 me:\n  On the older one.\n\n    #2 me:\n    A reply there.\n"
+    assert err == f"post={rust.id[:8]} comments=2\n"
+    cli.main(["show"])
+    out, err = capsys.readouterr()
+    assert out == "me:\nIs Go growing?\n\n  #1 me:\n  On the newest.\n\n  #2 me:\n  Newest again.\n"
+    assert err == f"post={go.id[:8]} comments=2\n"
+
+
+def _add_posts(db_path: Path, *ids: str) -> None:
+    """Posts by me with the given IDs, saved directly so their IDs are known."""
+
+    async def add() -> None:
+        async with open_store(_db_settings(db_path)) as store:
+            me = await store.find_user("me")
+            assert me is not None
+            for post_id in ids:
+                await store.add_message(Message(id=post_id, author_id=me.id, text=f"Post {post_id}"))
+
+    asyncio.run(add())
+
+
+@pytest.mark.parametrize("argv", [["comment", "Yes."], ["reply", "1", "Yes."], ["show"], ["notifications"]])
+def test_a_post_id_that_names_no_post_or_several_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, argv: list[str]
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["posts"])  # creates the users
+    first, second = "abcd1234" + "0" * 24, "abcd1234" + "1" * 24
+    _add_posts(db_path, first, second)
+    capsys.readouterr()
+
+    assert _fails(capsys, [*argv, "--post", "ff"]) == "error: there is no post ff: techdebate posts lists them\n"
+    assert _fails(capsys, [*argv, "--post", "abcd1234"]) == (
+        f"error: --post abcd1234 matches several posts ({second}, {first}): give more of the ID\n"
+    )
+    # Long enough to name one. The reply finds that post, which has no comment to answer.
+    if argv[0] == "reply":
+        assert _fails(capsys, [*argv, "--post", "abcd12341"]) == "error: there is no comment #1 on post abcd1234\n"
+    else:
+        cli.main([*argv, "--post", "abcd12341"])
+        assert capsys.readouterr().err.startswith(("post=abcd1234 ", "notifications=0"))
 
 
 def test_a_reply_number_that_is_not_a_number_is_an_argument_error(capsys: pytest.CaptureFixture[str]) -> None:
@@ -544,12 +635,13 @@ def test_notifications_say_who_wrote_what_where_and_why_and_are_closed_as_seen(
     cli.main(["notifications"])
 
     out, err = capsys.readouterr()
+    short = _posts(db_path)[0].id[:8]
     expected = [
-        ("#1 Developer [AI] commented on your post", "Yes.\nIt is."),
-        ("#3 Developer [AI] replied to #1", "GitHub."),
-        ("#4 Developer [AI] replied to #2, in thread #1", "And PyPI."),
-        ("#5 ann mentioned you, on the post", "What do you think, @Me?"),
-        ("#6 ann mentioned you, replying to #4", "@me again."),
+        (f"{short} #1 Developer [AI] commented on your post", "Yes.\nIt is."),
+        (f"{short} #3 Developer [AI] replied to #1", "GitHub."),
+        (f"{short} #4 Developer [AI] replied to #2, in thread #1", "And PyPI."),
+        (f"{short} #5 ann mentioned you, on the post", "What do you think, @Me?"),
+        (f"{short} #6 ann mentioned you, replying to #4", "@me again."),
     ]
     assert out == "\n\n".join(f"{header}:\n{text}" for header, text in expected) + "\n"
     assert err == "notifications=5\n"
@@ -575,11 +667,39 @@ def test_notifications_with_all_closes_only_the_pending_ones(
 
     cli.main(["notifications", "--all"])
 
+    short = _posts(db_path)[0].id[:8]
     assert capsys.readouterr().out == (
-        "#1 Developer [AI] commented on your post (seen):\nYes.\n\n#2 Developer [AI] commented on your post:\nMore.\n"
+        f"{short} #1 Developer [AI] commented on your post (seen):\nYes.\n\n"
+        f"{short} #2 Developer [AI] commented on your post:\nMore.\n"
     )
     cli.main(["notifications"])
     assert capsys.readouterr().out == "No notifications.\n"
+
+
+def test_notifications_list_every_post_and_post_narrows_them_to_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    cli.main(["post", "Is Go growing?"])
+    go, rust = _posts(db_path)
+    _write_as(db_path, "developer", "Rust: yes.", post=rust)
+    _write_as(db_path, "developer", "Go: yes.", post=go)
+    _write_as(db_path, "developer", "Rust: more.", post=rust)
+    capsys.readouterr()
+
+    cli.main(["notifications", "--post", go.id[:5]])
+
+    assert capsys.readouterr() == (
+        f"{go.id[:8]} #1 Developer [AI] commented on your post:\nGo: yes.\n",
+        "notifications=1\n",
+    )
+    cli.main(["notifications"])  # only the ones on the other post are left, oldest first
+    assert capsys.readouterr() == (
+        f"{rust.id[:8]} #1 Developer [AI] commented on your post:\nRust: yes.\n\n"
+        f"{rust.id[:8]} #2 Developer [AI] commented on your post:\nRust: more.\n",
+        "notifications=2\n",
+    )
 
 
 def test_a_mention_in_a_post_is_described_as_such() -> None:
@@ -590,7 +710,7 @@ def test_a_mention_in_a_post_is_described_as_such() -> None:
 
     header = cli._notification_header(notification, post, Tree(post, []), {ann.id: ann})  # pyright: ignore[reportPrivateUsage]
 
-    assert header == "ann mentioned you in the post"
+    assert header == f"{post.id[:8]} ann mentioned you in the post"
 
 
 # run
@@ -626,10 +746,11 @@ def test_run_lets_the_agents_act_on_the_post_and_prints_each_visit(
     cli.main(["run"])
 
     out, err = capsys.readouterr()
+    short = _posts(tmp_path / "techdebate.db")[0].id[:8]
     assert sorted(out.splitlines()) == [
-        "Developer [AI] commented: #1",
-        "Pollster [AI] passed at research: Not my area.",
-        "Scientist [AI] passed at research: Not my area.",
+        f"{short} Developer [AI] commented: #1",
+        f"{short} Pollster [AI] passed at research: Not my area.",
+        f"{short} Scientist [AI] passed at research: Not my area.",
     ]
     assert err == "visits=3 comments=1 cost=$0.000000\n"
     cli.main(["show"])
@@ -671,7 +792,7 @@ def test_run_still_prints_a_comment_when_every_tool_fails(
     cli.main(["run"])
 
     out, err = capsys.readouterr()
-    assert "Developer [AI] commented: #1" in out.splitlines()
+    assert f"{_posts(tmp_path / 'techdebate.db')[0].id[:8]} Developer [AI] commented: #1" in out.splitlines()
     assert err.count("tool failed") == 3  # each failed tool still logs its warning
     assert err.splitlines()[-1] == "visits=3 comments=1 cost=$0.000000"
 
@@ -691,8 +812,9 @@ def test_run_records_a_failed_call_and_carries_on(
 
     out, err = capsys.readouterr()
     error = "Anthropic rate limit reached, still failing after retries"
+    short = _posts(tmp_path / "techdebate.db")[0].id[:8]
     assert sorted(out.splitlines()) == [
-        f"{name} [AI] failed: {error}" for name in ("Developer", "Pollster", "Scientist")
+        f"{short} {name} [AI] failed: {error}" for name in ("Developer", "Pollster", "Scientist")
     ]
     assert err.count("visit failed") == 3
     assert err.splitlines()[-1] == "visits=3 comments=0 cost=$0.000000"
@@ -713,7 +835,10 @@ def test_run_on_a_post_out_of_budget_makes_no_ai_call(
 
     out, err = capsys.readouterr()
     line = "out of budget: the post has spent $0.0000 of its $0.00 budget"
-    assert sorted(out.splitlines()) == [f"{name} [AI] {line}" for name in ("Developer", "Pollster", "Scientist")]
+    short = _posts(tmp_path / "techdebate.db")[0].id[:8]
+    assert sorted(out.splitlines()) == [
+        f"{short} {name} [AI] {line}" for name in ("Developer", "Pollster", "Scientist")
+    ]
     assert err == "visits=3 comments=0 cost=$0.000000\n"
     assert llm.calls == []
 
@@ -737,7 +862,7 @@ def test_a_visit_line_names_the_agent_and_what_it_did(
     agent = User(username="developer", kind=UserKind.AGENT)
     visit = Visit(
         agent=agent,
-        post_id="p",
+        post_id="3f2a9c1e0b7d4e8a9c1f2b3d4e5f6a7b",
         outcome=outcome,
         reason=reason,
         notifications=1,
@@ -745,4 +870,29 @@ def test_a_visit_line_names_the_agent_and_what_it_did(
         at_research=at_research,
     )
 
-    assert cli._visit_line(visit) == line  # pyright: ignore[reportPrivateUsage]
+    assert cli._visit_line(visit) == f"3f2a9c1e {line}"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_run_lines_name_the_post_of_each_visit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    cli.main(["post", "Is Go growing?"])
+    go, rust = _posts(db_path)
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
+    capsys.readouterr()
+
+    cli.main(["run"])
+
+    out, err = capsys.readouterr()
+    assert sorted(out.splitlines()) == sorted(
+        f"{post.id[:8]} {line}"
+        for post in (go, rust)
+        for line in (
+            "Developer [AI] commented: #1",
+            "Pollster [AI] passed at research: Not my area.",
+            "Scientist [AI] passed at research: Not my area.",
+        )
+    )
+    assert err == "visits=6 comments=2 cost=$0.000000\n"

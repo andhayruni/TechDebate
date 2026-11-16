@@ -35,8 +35,8 @@ class ForumError(TechDebateError):
 
 
 class CommandError(TechDebateError):
-    """A command used in a way the discussion does not allow: a second post, no post yet, or an unknown comment
-    number."""
+    """A command used in a way the discussion does not allow: no post yet, a post ID that names no post or several, or
+    an unknown comment number."""
 
 
 class BudgetExceeded(TechDebateError):

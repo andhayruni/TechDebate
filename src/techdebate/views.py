@@ -22,7 +22,7 @@ def overview_for(tree: Tree, users: Mapping[str, User], *, reply_chars: int, in_
     def text(comment: Message) -> str:
         if comment.parent_id == tree.post.id or comment.id in full:
             return comment.text
-        return _cut(comment.text, reply_chars)
+        return cut(comment.text, reply_chars)
 
     return _format(tree, users, tree.threads(), text)
 
@@ -55,7 +55,7 @@ def _format(
     return "\n\n".join(blocks)
 
 
-def _cut(text: str, limit: int) -> str:
+def cut(text: str, limit: int) -> str:
     """The text, or its start up to `limit` characters followed by the cut mark. The cut falls at the last whitespace
     before the limit, so no word or URL is split, or exactly at the limit when there is none."""
     if len(text) <= limit:

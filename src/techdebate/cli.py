@@ -1,7 +1,8 @@
 """Command-line entry point.
 
-`techdebate post`, `comment`, `reply`, `show` and `notifications` take part in the discussion stored in the database, as
-the user in `username`. `techdebate run` lets the agents act on their notifications until none is pending,
+`techdebate post`, `posts`, `comment`, `reply`, `show` and `notifications` take part in the discussions stored in the
+database, as the user in `username`. A post is named by its short ID, the start of its ID, and the commands that work on
+one post take `--post`. `techdebate run` lets the agents act on their notifications until none is pending,
 `techdebate ask "<question>"` checks the LLM setup, and `techdebate evidence <tool> "<query>"` runs one evidence tool.
 """
 
@@ -28,11 +29,16 @@ from techdebate.store import Store, open_store
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
 from techdebate.tree import Tree
 from techdebate.users import shown_name, sync_users
+from techdebate.views import cut
 
 log = logging.getLogger(__name__)
 
 # Thinking counts against max_tokens, so this leaves room for both.
 _ASK_MAX_TOKENS = 1024
+# How much of a post's ID is shown. `--post` takes any unique prefix, so this is only what is printed.
+_SHORT_ID_CHARS = 8
+# How much of a post's first line `posts` shows.
+_POST_START_CHARS = 60
 
 
 async def ask(llm: LLMClient, question: str, tier: ModelTier) -> LLMResponse:
@@ -93,46 +99,73 @@ async def _session(settings: Settings) -> AsyncGenerator[_Session]:
         )
 
 
-async def _the_post(store: Store) -> Tree:
-    """The post with its comments. There is a single post until several posts are supported."""
+def short_id(post_id: str) -> str:
+    """How a post is named in what the commands print."""
+    return post_id[:_SHORT_ID_CHARS]
+
+
+async def _find_post(store: Store, ref: str | None) -> Message:
+    """The post whose ID starts with `ref`, without regard to case, or the newest post without it."""
     posts = await store.list_posts()
-    found = await store.get_post(posts[0].id) if posts else None
-    if found is None:
+    if not posts:
         raise CommandError('there is no post yet: create one with techdebate post "<text>"')
+    if ref is None:
+        return posts[0]
+    prefix = ref.strip().lower()
+    matches = [post for post in posts if prefix and post.id.startswith(prefix)]
+    if not matches:
+        raise CommandError(f"there is no post {ref}: techdebate posts lists them")
+    if len(matches) > 1:
+        # Full IDs, since the short ones of the matches may be the same.
+        ids = ", ".join(post.id for post in matches)
+        raise CommandError(f"--post {ref} matches several posts ({ids}): give more of the ID")
+    return matches[0]
+
+
+async def _tree(store: Store, post: Message) -> Tree:
+    found = await store.get_post(post.id)
+    assert found is not None, "the post was just read"
     return Tree.of(found)
-
-
-async def _number(store: Store, comment: Message) -> int:
-    return (await _the_post(store)).number(comment)
 
 
 async def _post_command(settings: Settings, text: str) -> Message:
     async with _session(settings) as session:
-        if await session.store.list_posts():
-            raise CommandError(
-                "there is already a post, and only one is supported for now; "
-                f"delete the database file {settings.db_path} to start over"
-            )
         return await session.forum.create_post(session.me, text)
 
 
-async def _comment_command(settings: Settings, text: str, reply_to: int | None = None) -> int:
-    """The number of the new comment: a top-level one, or a reply to comment #reply_to."""
+async def _posts_command(settings: Settings) -> list[str]:
+    """One line per post, newest first: its short ID, its number of comments and the start of its text."""
     async with _session(settings) as session:
-        tree = await _the_post(session.store)
+        lines: list[str] = []
+        for post in await session.store.list_posts():
+            count = len((await _tree(session.store, post)).comments)
+            comments = f"{count} comment{'' if count == 1 else 's'}"
+            start = cut(post.text.splitlines()[0], _POST_START_CHARS)
+            lines.append(f"{short_id(post.id)}  {comments}  {start}")
+        return lines
+
+
+async def _comment_command(
+    settings: Settings, text: str, reply_to: int | None = None, post_ref: str | None = None
+) -> tuple[Message, int]:
+    """The post, and the number of the new comment on it: a top-level one, or a reply to comment #reply_to."""
+    async with _session(settings) as session:
+        post = await _find_post(session.store, post_ref)
+        tree = await _tree(session.store, post)
         parent = tree.post if reply_to is None else tree.comment(reply_to)
         if parent is None:
-            raise CommandError(f"there is no comment #{reply_to} on the post")
+            raise CommandError(f"there is no comment #{reply_to} on post {short_id(post.id)}")
         comment = await session.forum.create_comment(session.me, parent.id, text)
-        return await _number(session.store, comment)
+        return post, (await _tree(session.store, post)).number(comment)
 
 
-async def _show_command(settings: Settings) -> tuple[str, int]:
-    """The printed discussion, and its number of comments."""
+async def _show_command(settings: Settings, post_ref: str | None = None) -> tuple[Message, str, int]:
+    """The post, the printed discussion, and its number of comments."""
     async with _session(settings) as session:
-        tree = await _the_post(session.store)
+        post = await _find_post(session.store, post_ref)
+        tree = await _tree(session.store, post)
         users = {user.id: user for user in await session.store.list_users()}
-        return _format_discussion(tree, users), len(tree.comments)
+        return post, _format_discussion(tree, users), len(tree.comments)
 
 
 async def _run_command(settings: Settings) -> list[Visit]:
@@ -151,8 +184,8 @@ async def _run_command(settings: Settings) -> list[Visit]:
 
 
 def _visit_line(visit: Visit) -> str:
-    """Who made the visit, and what it did, in one line."""
-    name = shown_name(visit.agent)
+    """The post, who made the visit, and what it did, in one line."""
+    name = f"{short_id(visit.post_id)} {shown_name(visit.agent)}"
     numbers = ", ".join(f"#{n}" for n in visit.comments)
     if visit.outcome is NotificationOutcome.COMMENTED:
         return f"{name} commented: {numbers}"
@@ -189,12 +222,15 @@ def _comment_header(tree: Tree, comment: Message, users: dict[str, User]) -> str
     return f"#{tree.number(comment)} {shown_name(users[comment.author_id])}"
 
 
-async def _notifications_command(settings: Settings, *, include_closed: bool) -> int:
-    """Prints my notifications, oldest first, then closes the pending ones it printed as seen. Returns how many it
-    printed."""
+async def _notifications_command(settings: Settings, *, include_closed: bool, post_ref: str | None = None) -> int:
+    """Prints my notifications on every post, or on one with `post_ref`, oldest first, then closes the pending ones it
+    printed as seen. Returns how many it printed."""
     async with _session(settings) as session:
         store = session.store
         notifications = await store.list_notifications(session.me.id, include_closed=include_closed)
+        if post_ref is not None:
+            post = await _find_post(store, post_ref)
+            notifications = [notification for notification in notifications if notification.post_id == post.id]
         users = {user.id: user for user in await store.list_users()}
         trees: dict[str, Tree] = {}
         blocks: list[str] = []
@@ -214,12 +250,13 @@ async def _notifications_command(settings: Settings, *, include_closed: bool) ->
 
 
 def _notification_header(notification: Notification, message: Message, tree: Tree, users: dict[str, User]) -> str:
-    """Who wrote the message, where, and why it is listed, in plain words."""
+    """The post, who wrote the message, where, and why it is listed, in plain words."""
     seen = "" if notification.pending else " (seen)"
+    post = short_id(tree.post.id)
     author = shown_name(users[message.author_id])
     if message.parent_id is None:  # the post itself
         why = "mentioned you in the post" if notification.reason is NotificationReason.MENTION else "posted"
-        return f"{author} {why}{seen}"
+        return f"{post} {author} {why}{seen}"
     parent = tree.parent(message)
     if notification.reason is NotificationReason.THREAD:
         top = tree.top_level(message)
@@ -230,7 +267,7 @@ def _notification_header(notification: Notification, message: Message, tree: Tre
         why = f"mentioned you, {where}"
     else:  # a top-level comment, which a real user hears of on its own post
         why = "commented on your post"
-    return f"#{tree.number(message)} {author} {why}{seen}"
+    return f"{post} #{tree.number(message)} {author} {why}{seen}"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -250,18 +287,26 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence_cmd.add_argument("tool", help="Tool name, e.g. github_search or github_repo")
     evidence_cmd.add_argument("query", help="Fills the tool's query field")
 
-    post = sub.add_parser("post", parents=[common], help="Create the post (one for now)")
+    # The post a command works on, by its ID or any unique start of it, as `posts` prints it.
+    on_post = argparse.ArgumentParser(add_help=False)
+    on_post.add_argument("--post", metavar="ID", help="The post, by its ID or the start of it (default: the newest)")
+
+    post = sub.add_parser("post", parents=[common], help="Create a post")
     post.add_argument("text", help="The text of the post")
-    comment = sub.add_parser("comment", parents=[common], help="Add a top-level comment to the post")
+    sub.add_parser("posts", parents=[common], help="List the posts, newest first, with their short IDs")
+    comment = sub.add_parser("comment", parents=[common, on_post], help="Add a top-level comment to a post")
     comment.add_argument("text", help="The text of the comment")
-    reply = sub.add_parser("reply", parents=[common], help="Reply to comment #n")
+    reply = sub.add_parser("reply", parents=[common, on_post], help="Reply to comment #n on a post")
     reply.add_argument("number", type=int, metavar="n", help="The number of the comment to answer, as show prints it")
     reply.add_argument("text", help="The text of the reply")
-    sub.add_parser("show", parents=[common], help="Print the post and its threads")
+    sub.add_parser("show", parents=[common, on_post], help="Print a post and its threads")
     notifications = sub.add_parser(
         "notifications", parents=[common], help="List my pending notifications and mark them as seen"
     )
     notifications.add_argument("--all", action="store_true", help="List the ones already seen too")
+    notifications.add_argument(
+        "--post", metavar="ID", help="Only the ones on this post, by its ID or the start of it (default: every post)"
+    )
     return parser
 
 
@@ -287,17 +332,21 @@ def _run(args: argparse.Namespace) -> None:
         print(f"tool={args.tool} query={args.query!r} evidence={len(items)}", file=sys.stderr)
     if args.command == "post":
         post = asyncio.run(_post_command(get_settings(), args.text))
-        print(f"post={post.id}", file=sys.stderr)
+        print(f"post={short_id(post.id)}", file=sys.stderr)
+    if args.command == "posts":
+        lines = asyncio.run(_posts_command(get_settings()))
+        print("\n".join(lines) if lines else "No posts.")
+        print(f"posts={len(lines)}", file=sys.stderr)
     if args.command in ("comment", "reply"):
         reply_to = args.number if args.command == "reply" else None
-        number = asyncio.run(_comment_command(get_settings(), args.text, reply_to))
-        print(f"comment=#{number}", file=sys.stderr)
+        post, number = asyncio.run(_comment_command(get_settings(), args.text, reply_to, args.post))
+        print(f"post={short_id(post.id)} comment=#{number}", file=sys.stderr)
     if args.command == "show":
-        text, count = asyncio.run(_show_command(get_settings()))
+        post, text, count = asyncio.run(_show_command(get_settings(), args.post))
         print(text)
-        print(f"comments={count}", file=sys.stderr)
+        print(f"post={short_id(post.id)} comments={count}", file=sys.stderr)
     if args.command == "notifications":
-        count = asyncio.run(_notifications_command(get_settings(), include_closed=args.all))
+        count = asyncio.run(_notifications_command(get_settings(), include_closed=args.all, post_ref=args.post))
         print(f"notifications={count}", file=sys.stderr)
 
 
