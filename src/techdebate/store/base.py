@@ -4,6 +4,7 @@ models.py, and nothing from the database library leaves it."""
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from techdebate.models import LLMCall, Message, Notification, NotificationOutcome, Research, User, UserKind
@@ -58,8 +59,11 @@ class StoreOps(Protocol):
         """Every AI call made on the post, by any agent."""
         ...
 
-    async def spent_usd(self, *, post_id: str) -> float:
-        """The cost of the stored AI calls on the post, by any agent: 0 with none."""
+    async def spent_usd(
+        self, *, post_id: str | None = None, agent_id: str | None = None, since: datetime | None = None
+    ) -> float:
+        """The cost of the stored AI calls, 0 with none: on the post, by the agent and from `since` on, for each filter
+        given, and of every call without one."""
         ...
 
     async def add_research(self, research: Research) -> None:

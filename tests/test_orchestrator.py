@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ from techdebate.llm import FakeLLM, LLMRequest, LLMResponse
 from techdebate.llm.fake import Predicate, Reply
 from techdebate.models import (
     Evidence,
+    LLMCall,
     Message,
     Notification,
     NotificationOutcome,
@@ -617,6 +619,94 @@ async def test_a_visit_stopped_by_the_budget_keeps_the_comments_it_wrote(store: 
     assert (visit.outcome, visit.comments) == (NotificationOutcome.BUDGET, (2,))
     assert _calls(llm, "developer") == ["research.v1", "decide.v1", "developer.v1"]
     assert [c.text for c in (await world.tree(post)).comments] == ["My view.", "Developers use it."]
+
+
+# The budgets per agent and per day
+
+
+async def _spent(world: _World, name: str, post: Message, cost_usd: float, at: datetime | None = None) -> None:
+    """An AI call the agent made on the post, stored as if made at `at` (now by default)."""
+    call = LLMCall(
+        agent_id=world.agents[name].id,
+        post_id=post.id,
+        prompt_id="developer.v1",
+        model="m",
+        input_tokens=1,
+        output_tokens=1,
+        cost_usd=cost_usd,
+        duration_s=0.1,
+        created_at=at or datetime.now(UTC),
+    )
+    await world.store.add_llm_call(call)
+
+
+async def _handled(world: _World) -> None:
+    """Closes every agent's pending notifications, as if the agents had passed."""
+    for user in world.agents.values():
+        pending = await world.store.list_notifications(user.id)
+        await world.store.close_notifications([n.id for n in pending], NotificationOutcome.PASSED)
+
+
+async def test_an_agent_out_of_its_budget_for_today_stops_while_the_others_go_on(store: Store) -> None:
+    world = await _world(store, "first", "second")
+    earlier = await world.post("Go")
+    await _handled(world)
+    await _spent(world, "first", earlier, 0.30)  # on another post, which counts too
+    post = await world.post()
+    llm = _PricedLLM(rules=[*_comments("first"), *_comments("second")])
+
+    visits = await world.loop(llm, agent_budget_usd=0.30).run()  # the second's comment costs $0.28
+
+    assert {(v.agent.username, v.outcome, v.reason) for v in visits} == {
+        ("first", NotificationOutcome.BUDGET, "the agent has spent $0.3000 of its $0.30 budget for today"),
+        ("second", NotificationOutcome.COMMENTED, "The data is new."),
+    }
+    assert _calls(llm, "first") == []
+    assert _calls(llm, "second") == ["research.v1", "decide.v1", "developer.v1"]
+    assert [c.author_id for c in (await world.tree(post)).comments] == [world.agents["second"].id]
+    assert _outcomes(await world.notifications("first")) == [NotificationOutcome.PASSED, NotificationOutcome.BUDGET]
+
+
+async def test_all_agents_stop_on_every_post_at_the_daily_budget(store: Store) -> None:
+    world = await _world(store, "first", "second")
+    earlier = await world.post("Go")
+    await _spent(world, "first", earlier, 0.20)
+    await _spent(world, "second", earlier, 0.10)
+    await world.post()
+    llm = _PricedLLM(rules=[*_comments("first"), *_comments("second")])
+
+    visits = await world.loop(llm, daily_budget_usd=0.30).run()
+
+    assert llm.calls == []
+    assert {(v.agent.username, v.outcome) for v in visits} == {
+        ("first", NotificationOutcome.BUDGET),
+        ("second", NotificationOutcome.BUDGET),
+    }
+    assert {v.reason for v in visits} == {"the agents have spent $0.3000 of their $0.30 budget for today"}
+    for name in ("first", "second"):
+        assert _outcomes(await world.notifications(name)) == [NotificationOutcome.BUDGET] * 2
+
+
+async def test_the_next_day_the_agents_act_on_new_notifications_and_not_on_those_closed_for_the_budget(
+    store: Store,
+) -> None:
+    world = await _world(store)
+    yesterday = datetime.now(UTC) - timedelta(days=1)
+    earlier = await world.post("Go")
+    await _spent(world, "developer", earlier, 0.30, at=yesterday)  # yesterday's budgets were used up
+    [closed] = await world.notifications("developer")
+    await store.close_notifications([closed.id], NotificationOutcome.BUDGET)  # as yesterday's visit did
+    post = await world.post()
+    llm = _PricedLLM(rules=_comments("developer"))
+
+    [visit] = await world.loop(llm, agent_budget_usd=0.30, daily_budget_usd=0.30).run()
+
+    assert (visit.post_id, visit.outcome) == (post.id, NotificationOutcome.COMMENTED)
+    assert _outcomes(await world.notifications("developer")) == [
+        NotificationOutcome.BUDGET,
+        NotificationOutcome.COMMENTED,
+    ]
+    assert (await world.tree(earlier)).comments == ()
 
 
 async def test_a_visit_costs_its_stored_calls(store: Store) -> None:

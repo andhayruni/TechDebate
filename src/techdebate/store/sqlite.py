@@ -144,8 +144,16 @@ class _SessionOps:
         query = select(LLMCallRow).where(LLMCallRow.post_id == post_id).order_by(LLMCallRow.seq)
         return [_llm_call(row) for row in await self._session.scalars(query)]
 
-    async def spent_usd(self, *, post_id: str) -> float:
-        query = select(func.coalesce(func.sum(LLMCallRow.cost_usd), 0.0)).where(LLMCallRow.post_id == post_id)
+    async def spent_usd(
+        self, *, post_id: str | None = None, agent_id: str | None = None, since: datetime | None = None
+    ) -> float:
+        query = select(func.coalesce(func.sum(LLMCallRow.cost_usd), 0.0))
+        if post_id is not None:
+            query = query.where(LLMCallRow.post_id == post_id)
+        if agent_id is not None:
+            query = query.where(LLMCallRow.agent_id == agent_id)
+        if since is not None:
+            query = query.where(LLMCallRow.created_at >= since)
         return float(await self._session.scalar(query) or 0.0)
 
     async def add_research(self, research: Research) -> None:
@@ -226,9 +234,11 @@ class SqliteStore:
         async with self._read() as ops:
             return await ops.list_llm_calls(post_id)
 
-    async def spent_usd(self, *, post_id: str) -> float:
+    async def spent_usd(
+        self, *, post_id: str | None = None, agent_id: str | None = None, since: datetime | None = None
+    ) -> float:
         async with self._read() as ops:
-            return await ops.spent_usd(post_id=post_id)
+            return await ops.spent_usd(post_id=post_id, agent_id=agent_id, since=since)
 
     async def add_research(self, research: Research) -> None:
         async with self.transaction() as tx:

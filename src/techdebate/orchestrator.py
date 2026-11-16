@@ -2,8 +2,8 @@
 time, and the agents act at the same time, so the order of the comments comes out of that.
 
 A visit takes the agent's oldest pending notification, with its other pending notifications on the same post. It closes
-them all when the post is out of budget, closes the ones the agent may not act on, researches the post if the agent has
-not yet, decides where to comment, writes, and closes the notifications with what happened."""
+them all when the post, the agent or the day is out of budget, closes the ones the agent may not act on, researches
+the post if the agent has not yet, decides where to comment, writes, and closes the notifications with what happened."""
 
 import asyncio
 import logging
@@ -14,7 +14,7 @@ from techdebate.analyst import Analyst, News
 from techdebate.config import Settings
 from techdebate.errors import BudgetExceeded, LLMError
 from techdebate.forum import Forum
-from techdebate.llm import Budget, LLMClient, RecordingLLM, post_scopes
+from techdebate.llm import Budget, LLMClient, RecordingLLM, budget_scopes
 from techdebate.models import (
     Message,
     Notification,
@@ -129,7 +129,7 @@ class AgentLoop:
         tree = Tree.of(found)
         places = places_for(tree, agent.id, max_per_thread=self._settings.max_comments_per_thread)
         recording = RecordingLLM(self._llm, self._store, agent=agent, post_id=post_id)
-        llm = Budget(recording, self._store, post_scopes(self._settings), agent=agent, post_id=post_id)
+        llm = Budget(recording, self._store, budget_scopes(self._settings), agent=agent, post_id=post_id)
 
         # Step 1: no AI call for what the agent may not act on. A budget used up closes the whole post, so it comes
         # before the limits.

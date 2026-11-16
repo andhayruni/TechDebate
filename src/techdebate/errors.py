@@ -39,11 +39,29 @@ class CommandError(TechDebateError):
     unknown comment number, or the agents started while another process runs them."""
 
 
+def usd_limit(limit_usd: float) -> str:
+    """A budget's limit in dollars: with cents, and with more digits only when it has them, so $0.015 is not shown as
+    $0.01."""
+    cents = f"{limit_usd:.2f}"
+    if float(cents) == round(limit_usd, 6):
+        return f"${cents}"
+    return f"${limit_usd:.6f}".rstrip("0")
+
+
+# What each budget scope's message says, by its name. A scope not listed here is named as it is.
+_SPENT = {
+    "post": "the post has spent {spent} of its {limit} budget",
+    "agent": "the agent has spent {spent} of its {limit} budget for today",
+    "day": "the agents have spent {spent} of their {limit} budget for today",
+}
+
+
 class BudgetExceeded(TechDebateError):
-    """A spending cap was reached: what the scope (such as "post") has spent, against its limit."""
+    """A spending cap was reached: what the scope ("post", "agent" or "day") has spent, against its limit."""
 
     def __init__(self, scope: str, spent_usd: float, limit_usd: float) -> None:
-        super().__init__(f"the {scope} has spent ${spent_usd:.4f} of its ${limit_usd:.2f} budget")
+        template = _SPENT.get(scope, f"the {scope} has spent {{spent}} of its {{limit}} budget")
+        super().__init__(template.format(spent=f"${spent_usd:.4f}", limit=usd_limit(limit_usd)))
         self.scope = scope
         self.spent_usd = spent_usd
         self.limit_usd = limit_usd

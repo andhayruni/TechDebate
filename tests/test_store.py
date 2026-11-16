@@ -251,6 +251,29 @@ async def test_spent_is_the_cost_of_the_calls_on_the_post(store: Store) -> None:
     assert await store.spent_usd(post_id="unknown") == 0.0
 
 
+async def test_spent_is_narrowed_by_the_post_the_agent_and_the_time_combined(store: Store) -> None:
+    developer, post, other = await _two_posts(store)
+    scientist = User(username="scientist", kind=UserKind.AGENT)
+    await store.add_user(scientist)
+    noon = datetime(2026, 11, 16, 12, tzinfo=UTC)
+    for agent, on, cost, at in [
+        (developer, post, 0.01, noon - timedelta(seconds=1)),
+        (developer, other, 0.02, noon),
+        (scientist, post, 0.04, noon),
+        (developer, post, 0.08, noon + timedelta(hours=1)),
+    ]:
+        await store.add_llm_call(_call(agent, on, "decide.v1").model_copy(update={"cost_usd": cost, "created_at": at}))
+
+    assert await store.spent_usd() == pytest.approx(0.15)
+    assert await store.spent_usd(agent_id=developer.id) == pytest.approx(0.11)
+    assert await store.spent_usd(since=noon) == pytest.approx(0.14)  # from `since` on, itself included
+    assert await store.spent_usd(agent_id=developer.id, since=noon) == pytest.approx(0.10)
+    assert await store.spent_usd(post_id=post.id, agent_id=developer.id, since=noon) == pytest.approx(0.08)
+    assert await store.spent_usd(since=noon.astimezone(timezone(timedelta(hours=5)))) == pytest.approx(0.14)
+    with pytest.raises(StatementError, match="without a time zone"):
+        await store.spent_usd(since=noon.replace(tzinfo=None))
+
+
 async def test_an_llm_call_needs_a_known_agent_and_post(store: Store) -> None:
     developer, post, _ = await _two_posts(store)
 

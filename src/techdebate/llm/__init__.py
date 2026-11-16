@@ -3,7 +3,7 @@ refuses calls once a budget is used up, and a scripted fake for tests."""
 
 from techdebate.llm.anthropic_client import AnthropicLLM
 from techdebate.llm.base import LLMClient, LLMRequest, LLMResponse, Message, ModelTier, Usage
-from techdebate.llm.budget import Budget, BudgetScope, post_scopes
+from techdebate.llm.budget import Budget, BudgetScope, budget_scopes, end_of_day, start_of_day
 from techdebate.llm.fake import FakeLLM
 from techdebate.llm.recording import RecordingLLM
 
@@ -19,5 +19,7 @@ __all__ = [
     "ModelTier",
     "RecordingLLM",
     "Usage",
-    "post_scopes",
+    "budget_scopes",
+    "end_of_day",
+    "start_of_day",
 ]
