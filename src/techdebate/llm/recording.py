@@ -17,6 +17,7 @@ class RecordingLLM:
         self._store = store
         self._agent = agent
         self._post_id = post_id
+        self.total_usd = 0.0  # the cost of the calls it stored
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         """Only a call that returns is stored: a failed one raises before there is anything to store."""
@@ -39,6 +40,7 @@ class RecordingLLM:
                 duration_s=duration_s,
             )
         )
+        self.total_usd += response.cost_usd
         log.debug(
             "llm call agent=%s post_id=%s prompt=%s model=%s input_tokens=%d output_tokens=%d cost=%.6f "
             "duration_s=%.1f",

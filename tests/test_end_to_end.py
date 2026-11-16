@@ -1,6 +1,8 @@
-"""A complete `techdebate run` with no network: only the model and the HTTP responses are replaced."""
+"""`techdebate post` and then `techdebate run` with no network: only the model and the HTTP responses are replaced,
+and the database is a temporary file."""
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 import respx
@@ -61,11 +63,31 @@ _OTHERS_PASS: list[tuple[Predicate, Reply]] = [
 
 
 @pytest.fixture(autouse=True)
-def _no_local_env(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+def _no_local_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # pyright: ignore[reportUnusedFunction]
     """A local .env can't change the result. With a YouTube key every agent takes part, and arXiv's spacing between
-    requests is off."""
-    settings = Settings(_env_file=None, YOUTUBE_API_KEY="key", arxiv_request_interval_s=0)  # pyright: ignore[reportCallIssue]
+    requests is off. The database is a temporary file."""
+    db_path = str(tmp_path / "techdebate.db")
+    settings = Settings(_env_file=None, YOUTUBE_API_KEY="key", arxiv_request_interval_s=0, db_path=db_path)  # pyright: ignore[reportCallIssue]
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+
+def _post_and_run(capsys: pytest.CaptureFixture[str], text: str = "httpx") -> tuple[list[str], str]:
+    """Creates the post and runs the agents: the visit lines, sorted since the agents act at the same time, and
+    stderr."""
+    cli.main(["post", text])
+    capsys.readouterr()
+    cli.main(["run"])
+    out, err = capsys.readouterr()
+    return sorted(out.splitlines()), err
+
+
+def _show(capsys: pytest.CaptureFixture[str]) -> str:
+    cli.main(["show"])
+    return capsys.readouterr().out
+
+
+def _calls_of(llm: FakeLLM, agent: str) -> list[LLMRequest]:
+    return [call for call in llm.calls if call.system.startswith(f"You are the {agent},")]
 
 
 @pytest.mark.usefixtures("mock_github", "mock_pypi")
@@ -75,11 +97,11 @@ def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
     )
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx"])
+    lines, err = _post_and_run(capsys)
 
-    research, decide, write, *others = llm.calls
+    research, decide, write = _calls_of(llm, "Developer")
     assert (research.prompt_id, decide.prompt_id, write.prompt_id) == ("research.v1", "decide.v1", "developer.v1")
-    assert [call.prompt_id for call in others] == ["research.v1", "research.v1"]  # the Scientist, then the Pollster
+    assert len(llm.calls) == 5  # and the research calls of the Scientist and the Pollster
     assert research.messages[0].content == f"{_OVERVIEW}\n\nNew to you: the post."
     # The write call gets the overview and the tool report the decide call saw, and where it writes what.
     report = decide.messages[0].content.removeprefix(f"{_OVERVIEW}\n\n{_DECIDE_BLOCK}\n\n")
@@ -97,9 +119,13 @@ def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.
         assert "httpx" not in call.system
         assert "You are the Developer" in call.system
 
-    out, err = capsys.readouterr()
-    assert out == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {_COMMENT}\n"
-    assert err == "comments=1 cost=$0.000000\n"  # nothing else, so no tool failed and no role was left out
+    assert lines == [
+        "Developer [AI] commented: #1",
+        "Pollster [AI] passed at research: Not a public topic.",
+        "Scientist [AI] passed at research: No research angle.",
+    ]
+    assert err == "visits=3 comments=1 cost=$0.000000\n"  # nothing else, so no tool failed and no role was left out
+    assert _show(capsys) == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {_COMMENT}\n"
 
 
 def test_every_agent_passes_at_the_research_call(
@@ -108,13 +134,13 @@ def test_every_agent_passes_at_the_research_call(
     llm = FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _SKIP)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx"])
+    lines, err = _post_and_run(capsys)
 
     assert [request.prompt_id for request in llm.calls] == ["research.v1"] * 3
     assert respx_mock.calls.call_count == 0
-    out, err = capsys.readouterr()
-    assert out == "me:\nhttpx\n\n  No comments.\n"
-    assert err == "comments=0 cost=$0.000000\n"
+    assert "Developer [AI] passed at research: Not my area." in lines
+    assert err == "visits=3 comments=0 cost=$0.000000\n"
+    assert _show(capsys) == "me:\nhttpx\n\n  No comments.\n"
 
 
 @pytest.mark.usefixtures("mock_github", "mock_pypi")
@@ -124,13 +150,13 @@ def test_the_developer_researches_and_then_passes(
     llm = FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _RESEARCH), (_is_decide, _NOTHING_NEW)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx"])
+    lines, err = _post_and_run(capsys)
 
-    assert [request.prompt_id for request in llm.calls] == ["research.v1", "decide.v1", "research.v1", "research.v1"]
+    assert [request.prompt_id for request in _calls_of(llm, "Developer")] == ["research.v1", "decide.v1"]
     assert respx_mock.calls.call_count > 0  # the searches ran
-    out, err = capsys.readouterr()
-    assert out == "me:\nhttpx\n\n  No comments.\n"
-    assert err == "comments=0 cost=$0.000000\n"
+    assert "Developer [AI] passed: The results only repeat the post." in lines
+    assert err == "visits=3 comments=0 cost=$0.000000\n"
+    assert _show(capsys) == "me:\nhttpx\n\n  No comments.\n"
 
 
 @pytest.mark.usefixtures("mock_github")
@@ -142,10 +168,10 @@ def test_the_developer_leaves_out_a_tool_that_does_not_fit(
     )
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx"])  # a request to PyPI would have no mock, and fail the test
+    _, err = _post_and_run(capsys)  # a request to PyPI would have no mock, and fail the test
 
-    assert llm.calls[1].messages[0].content.endswith("pypi: not used")
-    assert capsys.readouterr().err == "comments=1 cost=$0.000000\n"
+    assert _calls_of(llm, "Developer")[1].messages[0].content.endswith("pypi: not used")
+    assert err == "visits=3 comments=1 cost=$0.000000\n"
 
 
 def test_a_comment_is_still_written_when_every_source_is_down(
@@ -156,14 +182,14 @@ def test_a_comment_is_still_written_when_every_source_is_down(
     llm = FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _RESEARCH), (_is_decide, _COMMENT_ON_POST), (_is_write, text)])
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx"])
+    lines, err = _post_and_run(capsys)
 
-    for call in llm.calls[1:3]:  # the Developer's decide and write calls
+    for call in _calls_of(llm, "Developer")[1:]:  # the decide and write calls
         for tool in ("github_search", "github_repo", "pypi"):
             assert f'{tool}, query "httpx": the tool failed' in call.messages[0].content
-    out, err = capsys.readouterr()
-    assert out == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {text}\n"
+    assert "Developer [AI] commented: #1" in lines
     assert err.count("tool failed") == 3
+    assert _show(capsys) == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {text}\n"
 
 
 @pytest.mark.usefixtures("mock_github", "mock_pypi", "mock_arxiv", "mock_youtube")
@@ -179,8 +205,14 @@ def test_all_three_agents_research_with_their_own_tools_and_comment(
         "Scientist": ResearchPlan(speak=True, queries={"arxiv": ["vision transformer"]}, reason="Papers exist."),
         "Pollster": ResearchPlan(speak=True, queries={"youtube": ["rust programming"]}, reason="Videos exist."),
     }
+
+    def later_look(request: LLMRequest) -> bool:
+        """A decide call on the other agents' comments, which notify an agent that has commented on the post."""
+        return request.prompt_id == "decide.v1" and "New to you: the post" not in request.messages[0].content
+
     llm = FakeLLM(
         rules=[
+            (later_look, _NOTHING_NEW),
             (_is_research, _RESEARCH),
             *((_is(agent, "research.v1"), plan) for agent, plan in plans.items()),
             *((_is(agent, "decide.v1"), _COMMENT_ON_POST) for agent in comments),
@@ -189,30 +221,26 @@ def test_all_three_agents_research_with_their_own_tools_and_comment(
     )
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
 
-    cli.main(["run", "httpx"])
+    lines, err = _post_and_run(capsys)
 
-    # One agent after another, in registry order, each writing with its own prompt.
-    assert [call.prompt_id for call in llm.calls] == [
-        *("research.v1", "decide.v1", "developer.v1"),
-        *("research.v1", "decide.v1", "scientist.v1"),
-        *("research.v1", "decide.v1", "pollster.v1"),
-    ]
-    # Each agent's write call holds only its own tools' results, after the comments of the agents before it.
-    developer, scientist, pollster = (llm.calls[i].messages[0].content for i in (2, 5, 8))
-    reports = [content.split("Tool results:")[1] for content in (developer, scientist, pollster)]
-    assert "github.com" in reports[0] and "arxiv.org" not in reports[0] and "youtube.com" not in reports[0]
-    assert "arxiv.org" in reports[1] and "github.com" not in reports[1] and "youtube.com" not in reports[1]
-    assert "youtube.com" in reports[2] and "github.com" not in reports[2] and "arxiv.org" not in reports[2]
-    first = f"Post by me:\nhttpx\n\n  #1 Developer [AI]:\n  {comments['Developer']}"
-    second = f"{first}\n\n  #2 Scientist [AI]:\n  {comments['Scientist']}"
-    assert scientist.startswith(f'{first}\n\nTool results:\n\narxiv, query "vision transformer":\n')
-    assert pollster.startswith(f'{second}\n\nTool results:\n\nyoutube, query "rust programming":\n')
+    # Each agent researches once and writes with its own prompt, and its write call holds only its own tools' results.
+    reports: dict[str, str] = {}
+    for agent in comments:
+        calls = _calls_of(llm, agent)
+        assert [call.prompt_id for call in calls].count("research.v1") == 1
+        [write] = [call for call in calls if call.prompt_id == f"{agent.lower()}.v1"]
+        reports[agent] = write.messages[0].content.split("Tool results:")[1]
+    assert "github.com" in reports["Developer"] and "arxiv.org" not in reports["Developer"]
+    assert "arxiv.org" in reports["Scientist"] and "github.com" not in reports["Scientist"]
+    assert "youtube.com" in reports["Pollster"] and "github.com" not in reports["Pollster"]
+    assert "youtube.com" not in reports["Developer"] + reports["Scientist"]
+    assert "arxiv.org" not in reports["Pollster"]
 
-    out, err = capsys.readouterr()
-    assert out == (
-        "me:\nhttpx\n\n"
-        f"  #1 Developer [AI]:\n  {comments['Developer']}\n\n"
-        f"  #2 Scientist [AI]:\n  {comments['Scientist']}\n\n"
-        f"  #3 Pollster [AI]:\n  {comments['Pollster']}\n"
-    )
-    assert err == "comments=3 cost=$0.000000\n"
+    # Each top-level comment notified the agents that had already commented, which then passed.
+    commented = [line for line in lines if " commented: " in line]
+    assert sorted(line.split(" [AI]")[0] for line in commented) == ["Developer", "Pollster", "Scientist"]
+    assert all(" passed: " in line for line in lines if line not in commented)
+    assert err.splitlines()[-1].endswith("comments=3 cost=$0.000000")
+    shown = _show(capsys)
+    for text in comments.values():
+        assert text in shown

@@ -22,6 +22,7 @@ from techdebate.models import (
     Evidence,
     Message,
     Notification,
+    NotificationOutcome,
     NotificationReason,
     ReplyTo,
     ResearchPlan,
@@ -29,6 +30,7 @@ from techdebate.models import (
     User,
     UserKind,
 )
+from techdebate.orchestrator import Visit
 from techdebate.prompts import load_prompt
 from techdebate.roles import ROLE_SPECS
 from techdebate.store import open_store
@@ -39,9 +41,9 @@ from techdebate.tree import Tree
 @pytest.mark.parametrize(
     ("argv", "verbose"),
     [
-        (["run", "Rust"], False),
-        (["-v", "run", "Rust"], True),
-        (["run", "Rust", "-v"], True),
+        (["run"], False),
+        (["-v", "run"], True),
+        (["run", "-v"], True),
         (["ask", "What is Rust?", "-v"], True),
         (["evidence", "github_repo", "rust-lang/rust", "-v"], True),
     ],
@@ -65,7 +67,7 @@ def test_techdebate_error_becomes_clean_message(
 
     monkeypatch.setattr(cli, "_run", fail)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", "Rust"])
+        cli.main(["run"])
 
     assert exc.value.code == 1
     err = capsys.readouterr().err
@@ -319,143 +321,6 @@ def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
 
 
-def test_run_has_no_delay_flag() -> None:
-    with pytest.raises(SystemExit):
-        cli._build_parser().parse_args(["run", "Rust", "--no-delay"])  # pyright: ignore[reportPrivateUsage]
-
-
-def test_run_command_prints_the_post_and_the_comment_with_its_ai_label(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _use_settings(monkeypatch)
-    _use_agent_tools(monkeypatch)
-    text = "Developers use [it](https://example.com/github_search)."
-    llm = FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, text)])
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    cli.main(["run", "Rust"])
-
-    out, err = capsys.readouterr()
-    assert out == f"me:\nRust\n\n  #1 Developer [AI]:\n  {text}\n"
-    assert err == "comments=1 cost=$0.000000\n"
-
-
-def test_run_command_says_so_when_nobody_comments(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _use_settings(monkeypatch, username="alice")
-    _use_agent_tools(monkeypatch)
-    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _SKIP)]))
-
-    cli.main(["run", "Sourdough"])
-
-    out, err = capsys.readouterr()
-    assert out == "alice:\nSourdough\n\n  No comments.\n"
-    assert err == "comments=0 cost=$0.000000\n"
-
-
-def test_run_command_prints_the_cost_of_every_call(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    class _Priced(FakeLLM):
-        async def generate(self, request: LLMRequest) -> LLMResponse:
-            response = await super().generate(request)
-            return response.model_copy(update={"cost_usd": 0.25 if _is_write(request) else 0.01})
-
-    _use_settings(monkeypatch)
-    _use_agent_tools(monkeypatch)
-    monkeypatch.setattr(cli, "_make_llm", lambda: _Priced(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
-
-    cli.main(["run", "Rust"])
-
-    # The Developer's research, decide and write, and the research calls of the two agents that pass.
-    assert capsys.readouterr().err == "comments=1 cost=$0.290000\n"
-
-
-def test_run_command_refuses_a_username_that_breaks_the_rule(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _use_settings(monkeypatch, username="Andok")
-    _use_agent_tools(monkeypatch)
-    llm = FakeLLM()
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["run", "Rust"])
-
-    assert exc.value.code == 1
-    assert capsys.readouterr() == (
-        "",
-        "error: username 'Andok' is invalid: use 1 to 30 lowercase letters, digits or underscores\n",
-    )
-    assert llm.calls == []
-
-
-def test_run_command_prints_a_reply_to_an_earlier_agent_nested_under_it(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _use_settings(monkeypatch)
-    _use_agent_tools(monkeypatch)
-
-    def of(display_name: str, prompt_id: str) -> Predicate:
-        def matches(request: LLMRequest) -> bool:
-            return request.prompt_id == prompt_id and request.system.startswith(f"You are the {display_name},")
-
-        return matches
-
-    reply = SpeakDecision(reason="I disagree.", reply_to=[ReplyTo(place=1, point="Few papers.")])
-    llm = FakeLLM(
-        rules=[
-            _passes_at_research("Pollster", ("youtube",)),
-            (of("Scientist", "research.v1"), ResearchPlan(speak=True, queries={"arxiv": ["x"]}, reason="Papers.")),
-            (of("Scientist", "decide.v1"), reply),
-            (of("Scientist", "scientist.v1"), "Few papers so far."),
-            *_COMMENTS,
-            (_is_write, "Developers use it."),
-        ]
-    )
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    cli.main(["run", "Rust"])
-
-    out, err = capsys.readouterr()
-    assert out == (
-        "me:\nRust\n\n  #1 Developer [AI]:\n  Developers use it.\n\n    #2 Scientist [AI]:\n    Few papers so far.\n"
-    )
-    assert err == "comments=2 cost=$0.000000\n"
-
-
-def test_run_command_still_prints_a_comment_when_every_tool_fails(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _use_settings(monkeypatch)
-    _use_agent_tools(monkeypatch, ToolError("github is down"))
-    llm = FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "It is widely used.")])
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    cli.main(["run", "Rust"])
-
-    out, err = capsys.readouterr()
-    assert out == "me:\nRust\n\n  #1 Developer [AI]:\n  It is widely used.\n"
-    assert err.count("tool failed") == 3  # each failed tool still logs its warning
-    assert err.splitlines()[-1] == "comments=1 cost=$0.000000"
-
-
-def test_run_command_llm_error_becomes_clean_message(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    def make_llm() -> LLMClient:
-        return _FailingLLM()
-
-    _use_settings(monkeypatch)
-    _use_agent_tools(monkeypatch)
-    monkeypatch.setattr(cli, "_make_llm", make_llm)
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["run", "Rust"])
-
-    assert exc.value.code == 1
-    assert capsys.readouterr() == ("", "error: Anthropic rate limit reached, still failing after retries\n")
-
-
 def test_ctrl_c_prints_one_line_and_exits_with_130(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -464,7 +329,7 @@ def test_ctrl_c_prints_one_line_and_exits_with_130(
 
     monkeypatch.setattr(cli, "_run", interrupt)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", "Rust"])
+        cli.main(["run"])
 
     assert exc.value.code == 130
     assert capsys.readouterr() == ("", "interrupted\n")
@@ -726,3 +591,138 @@ def test_a_mention_in_a_post_is_described_as_such() -> None:
     header = cli._notification_header(notification, post, Tree(post, []), {ann.id: ann})  # pyright: ignore[reportPrivateUsage]
 
     assert header == "ann mentioned you in the post"
+
+
+# run
+
+
+def test_run_takes_no_argument() -> None:
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(["run", "Rust"])  # pyright: ignore[reportPrivateUsage]
+
+
+def test_run_before_any_post_is_quiet(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+    llm = FakeLLM()
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+
+    cli.main(["run"])
+
+    assert capsys.readouterr() == ("", "visits=0 comments=0 cost=$0.000000\n")
+    assert llm.calls == []
+
+
+def test_run_lets_the_agents_act_on_the_post_and_prints_each_visit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    text = "Developers use [it](https://example.com/github_search)."
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, text)]))
+    capsys.readouterr()
+
+    cli.main(["run"])
+
+    out, err = capsys.readouterr()
+    assert sorted(out.splitlines()) == [
+        "Developer [AI] commented: #1",
+        "Pollster [AI] passed at research: Not my area.",
+        "Scientist [AI] passed at research: Not my area.",
+    ]
+    assert err == "visits=3 comments=1 cost=$0.000000\n"
+    cli.main(["show"])
+    assert capsys.readouterr().out == f"me:\nIs Rust growing?\n\n  #1 Developer [AI]:\n  {text}\n"
+
+    cli.main(["run"])  # the post is quiet now
+
+    assert capsys.readouterr() == ("", "visits=0 comments=0 cost=$0.000000\n")
+
+
+def test_run_prints_the_cost_of_every_call(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    class _Priced(FakeLLM):
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            response = await super().generate(request)
+            return response.model_copy(update={"cost_usd": 0.25 if _is_write(request) else 0.01})
+
+    _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    monkeypatch.setattr(cli, "_make_llm", lambda: _Priced(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
+    capsys.readouterr()
+
+    cli.main(["run"])
+
+    # The Developer's research, decide and write, and the research calls of the two agents that pass.
+    assert capsys.readouterr().err == "visits=3 comments=1 cost=$0.290000\n"
+
+
+def test_run_still_prints_a_comment_when_every_tool_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+    _use_agent_tools(monkeypatch, ToolError("github is down"))
+    cli.main(["post", "Is Rust growing?"])
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
+    capsys.readouterr()
+
+    cli.main(["run"])
+
+    out, err = capsys.readouterr()
+    assert "Developer [AI] commented: #1" in out.splitlines()
+    assert err.count("tool failed") == 3  # each failed tool still logs its warning
+    assert err.splitlines()[-1] == "visits=3 comments=1 cost=$0.000000"
+
+
+def test_run_records_a_failed_call_and_carries_on(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    def make_llm() -> LLMClient:
+        return _FailingLLM()
+
+    _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    monkeypatch.setattr(cli, "_make_llm", make_llm)
+    capsys.readouterr()
+
+    cli.main(["run"])  # does not exit with an error
+
+    out, err = capsys.readouterr()
+    error = "Anthropic rate limit reached, still failing after retries"
+    assert sorted(out.splitlines()) == [
+        f"{name} [AI] failed: {error}" for name in ("Developer", "Pollster", "Scientist")
+    ]
+    assert err.count("visit failed") == 3
+    assert err.splitlines()[-1] == "visits=3 comments=0 cost=$0.000000"
+    cli.main(["run"])  # the failed notifications are closed, so nothing is left
+    assert capsys.readouterr().err == "visits=0 comments=0 cost=$0.000000\n"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason", "at_research", "comments", "line"),
+    [
+        (NotificationOutcome.COMMENTED, "New data.", False, (4, 5), "Developer [AI] commented: #4, #5"),
+        (NotificationOutcome.PASSED, "Nothing new.", False, (), "Developer [AI] passed: Nothing new."),
+        (NotificationOutcome.PASSED, "Not my area.", True, (), "Developer [AI] passed at research: Not my area."),
+        (NotificationOutcome.LIMIT, "thread #1 is full", False, (), "Developer [AI] at its limit: thread #1 is full"),
+        (NotificationOutcome.FAILED, "down", False, (), "Developer [AI] failed: down"),
+        (NotificationOutcome.FAILED, "down", False, (3,), "Developer [AI] failed after writing #3: down"),
+    ],
+)
+def test_a_visit_line_names_the_agent_and_what_it_did(
+    outcome: NotificationOutcome, reason: str, at_research: bool, comments: tuple[int, ...], line: str
+) -> None:
+    agent = User(username="developer", kind=UserKind.AGENT)
+    visit = Visit(
+        agent=agent,
+        post_id="p",
+        outcome=outcome,
+        reason=reason,
+        notifications=1,
+        comments=comments,
+        at_research=at_research,
+    )
+
+    assert cli._visit_line(visit) == line  # pyright: ignore[reportPrivateUsage]

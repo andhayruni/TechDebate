@@ -1,17 +1,32 @@
+import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from pydantic import HttpUrl
 
 from techdebate.config import Settings
-from techdebate.errors import LLMError, PromptError, ToolError
-from techdebate.llm import CostMeter, FakeLLM, LLMRequest, LLMResponse
+from techdebate.errors import PromptError, ToolError
+from techdebate.forum import Forum
+from techdebate.llm import FakeLLM, LLMRequest, LLMResponse
 from techdebate.llm.fake import Predicate, Reply
-from techdebate.models import Evidence, Message, ReplyTo, ResearchPlan, SpeakDecision, User, UserKind
-from techdebate.orchestrator import check_post
+from techdebate.models import (
+    Evidence,
+    Message,
+    Notification,
+    NotificationOutcome,
+    ReplyTo,
+    ResearchPlan,
+    SpeakDecision,
+    User,
+)
+from techdebate.orchestrator import AgentLoop, Visit
 from techdebate.roles import RoleRegistry, RoleSpec
+from techdebate.store import Store
 from techdebate.tools import ToolInput, ToolRegistry
+from techdebate.tree import Tree
+from techdebate.users import sync_users
 
 _RESEARCH = ResearchPlan(speak=True, queries={"stub": ["rust lang"]}, reason="In my area.")
 _SKIP = ResearchPlan(speak=False, queries={"stub": []}, reason="Not my area.")
@@ -25,11 +40,11 @@ class _StubInput(ToolInput):
 
 
 class _StubTool:
+    name = "stub"
     description = "Finds things"
     input_model = _StubInput
 
-    def __init__(self, name: str = "stub", error: ToolError | None = None) -> None:
-        self.name = name
+    def __init__(self, error: ToolError | None = None) -> None:
         self.queries: list[str] = []
         self._error = error
 
@@ -38,9 +53,7 @@ class _StubTool:
         if self._error:
             raise self._error
         return [
-            Evidence(
-                source=self.name, query=input.query, url=HttpUrl("https://example.com/x"), title="x", summary="found"
-            )
+            Evidence(source="stub", query=input.query, url=HttpUrl("https://example.com/x"), title="x", summary="found")
         ]
 
 
@@ -52,24 +65,15 @@ class _PricedLLM(FakeLLM):
         return response.model_copy(update={"cost_usd": _PRICES[request.prompt_id or ""]})
 
 
-_ME = User(username="me", kind=UserKind.REAL)
-_POST = Message(author_id=_ME.id, text="Rust")
-_OVERVIEW = "Post by me:\nRust\n\n  No comments yet."
-
-
-def _role(name: str = "developer", prompt_id: str = "developer.v1") -> RoleSpec:
+def _role(name: str, prompt_id: str = "developer.v1") -> RoleSpec:
     return RoleSpec(
         name=name, display_name=name.title(), question="Who uses it?", tool_names=("stub",), prompt_id=prompt_id
     )
 
 
-def _settings(**overrides: Any) -> Settings:
-    return Settings(_env_file=None, **overrides)  # pyright: ignore[reportCallIssue]
-
-
-def _by(prompt_id: str, name: str | None) -> Predicate:
+def _by(prompt_id: str, name: str) -> Predicate:
     def matches(request: LLMRequest) -> bool:
-        return request.prompt_id == prompt_id and (name is None or f"You are the {name.title()}" in request.system)
+        return request.prompt_id == prompt_id and request.system.startswith(f"You are the {name.title()},")
 
     return matches
 
@@ -82,291 +86,411 @@ def _decides(name: str, decision: SpeakDecision) -> tuple[Predicate, Reply]:
     return _by("decide.v1", name), decision
 
 
-def _writes(text: str = "Developers use it.", name: str | None = None) -> tuple[Predicate, Reply]:
+def _writes(name: str, text: str = "Developers use it.") -> tuple[Predicate, Reply]:
     return _by("developer.v1", name), text
 
 
-def _prompt_ids(llm: FakeLLM) -> list[str | None]:
-    return [request.prompt_id for request in llm.calls]
+def _comments(name: str, text: str = "Developers use it.") -> list[tuple[Predicate, Reply]]:
+    """The calls of an agent that researches and comments on the post."""
+    return [_plans(name, _RESEARCH), _decides(name, _COMMENT), _writes(name, text)]
 
 
-def _agents(*roles: RoleSpec) -> dict[str, User]:
-    return {role.name: User(username=role.name, kind=UserKind.AGENT) for role in roles}
+def _calls(llm: FakeLLM, name: str) -> list[str | None]:
+    """The prompt IDs of one agent's calls, in order."""
+    return [r.prompt_id for r in llm.calls if r.system.startswith(f"You are the {name.title()},")]
 
 
-async def _run(
-    llm: FakeLLM | CostMeter, *roles: RoleSpec, tool: _StubTool | None = None, agents: dict[str, User] | None = None
-) -> list[Message]:
-    roles = roles or (_role(),)
-    return await check_post(
-        _POST,
-        author=_ME,
-        agents=agents if agents is not None else _agents(*roles),
-        llm=llm,
-        roles=RoleRegistry(roles),
-        tools=ToolRegistry([tool or _StubTool()]),
-        settings=_settings(),
+@dataclass
+class _World:
+    store: Store
+    me: User
+    agents: dict[str, User]
+    forum: Forum
+    roles: RoleRegistry
+    tool: _StubTool
+
+    def loop(self, llm: FakeLLM, **settings: Any) -> AgentLoop:
+        return AgentLoop(
+            self.store,
+            self.forum,
+            self.agents,
+            llm=llm,
+            roles=self.roles,
+            tools=ToolRegistry([self.tool]),
+            settings=Settings(_env_file=None, **settings),  # pyright: ignore[reportCallIssue]
+        )
+
+    async def post(self, text: str = "Rust") -> Message:
+        return await self.forum.create_post(self.me, text)
+
+    async def reply(self, parent: Message, text: str) -> Message:
+        return await self.forum.create_comment(self.me, parent.id, text)
+
+    async def tree(self, post: Message) -> Tree:
+        found = await self.store.get_post(post.id)
+        assert found is not None
+        return Tree.of(found)
+
+    async def notifications(self, name: str) -> list[Notification]:
+        return await self.store.list_notifications(self.agents[name].id, include_closed=True)
+
+
+async def _world(store: Store, *names: str, tool: _StubTool | None = None) -> _World:
+    roles = RoleRegistry([_role(name) for name in names or ("developer",)])
+    users = await sync_users(store, roles, "me")
+    forum = Forum(store, users.agents.values())
+    return _World(store, users.me, users.agents, forum, roles, tool or _StubTool())
+
+
+def _outcomes(notifications: list[Notification]) -> list[NotificationOutcome | None]:
+    return [notification.outcome for notification in notifications]
+
+
+# A visit
+
+
+async def test_an_agent_researches_decides_and_comments_on_the_post(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    llm = FakeLLM(rules=_comments("developer", "Developers use [it](https://example.com/x)."))
+
+    [visit] = await world.loop(llm).run()
+
+    [comment] = (await world.tree(post)).comments
+    assert (comment.author_id, comment.parent_id, comment.text) == (
+        world.agents["developer"].id,
+        post.id,
+        "Developers use [it](https://example.com/x).",
+    )
+    assert visit == Visit(
+        agent=world.agents["developer"],
+        post_id=post.id,
+        outcome=NotificationOutcome.COMMENTED,
+        reason="The data is new.",
+        notifications=1,
+        comments=(1,),
+    )
+    assert _outcomes(await world.notifications("developer")) == [NotificationOutcome.COMMENTED]
+    assert world.tool.queries == ["rust lang"]
+    research = await store.get_research(world.agents["developer"].id, post.id)
+    assert research is not None and research.results[0].query == "rust lang"
+    # Every call is stored, for the agent and the post.
+    calls = await store.list_llm_calls(post.id)
+    assert [(c.agent_id, c.prompt_id) for c in calls] == [
+        (world.agents["developer"].id, prompt_id) for prompt_id in ("research.v1", "decide.v1", "developer.v1")
+    ]
+    research_call, decide_call, write_call = llm.calls
+    overview = "Post by me:\nRust\n\n  No comments yet."
+    assert research_call.messages[0].content == f"{overview}\n\nNew to you: the post."
+    assert decide_call.messages[0].content.startswith(
+        f"{overview}\n\nNew to you: the post.\nYou can comment on: 0 (a top-level comment on the post).\n\nTool"
+    )
+    assert write_call.messages[0].content.endswith(
+        "Your comment: a top-level comment on the post.\nYour point: Downloads doubled."
     )
 
 
-# Research, decide and write
-
-
-async def test_an_agent_researches_decides_and_comments_on_the_post() -> None:
-    llm = FakeLLM(
-        rules=[
-            _plans("developer", _RESEARCH),
-            _decides("developer", _COMMENT),
-            _writes("Developers use [it](https://example.com/x)."),
-        ]
-    )
-    tool = _StubTool()
-    agents = _agents(_role())
-
-    [comment] = await _run(llm, tool=tool, agents=agents)
-
-    assert comment.text == "Developers use [it](https://example.com/x)."
-    assert comment.author_id == agents["developer"].id
-    assert (comment.post_id, comment.parent_id) == (_POST.id, _POST.id)  # a top-level comment
-    assert tool.queries == ["rust lang"]  # the plan's query, not the post
-    assert _prompt_ids(llm) == ["research.v1", "decide.v1", "developer.v1"]
-    research, decide, write = llm.calls
-    # Both cheap calls see the post alone, new to the agent, and the post is the only place open to it.
-    assert research.messages[0].content == f"{_OVERVIEW}\n\nNew to you: the post."
-    decide_block = "New to you: the post.\nYou can comment on: 0 (a top-level comment on the post)."
-    report = decide.messages[0].content.removeprefix(f"{_OVERVIEW}\n\n{decide_block}\n\n")
-    assert report.startswith("Tool results:\n\n")
-    assert decide.output_schema is not None
-    # The write call gets the same overview and tool report, where the comment goes, and the point for its place.
-    assert write.messages[0].content == (
-        f"{_OVERVIEW}\n\n{report}\n\nYour comment: a top-level comment on the post.\nYour point: Downloads doubled."
-    )
-    assert "https://example.com/x" in report
-
-
-async def test_a_pass_at_the_research_call_searches_and_writes_nothing() -> None:
+async def test_a_pass_at_the_research_call_searches_and_saves_nothing(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
     llm = FakeLLM(rules=[_plans("developer", _SKIP)])
-    tool = _StubTool()
 
-    assert await _run(llm, tool=tool) == []
-    assert tool.queries == []
-    assert _prompt_ids(llm) == ["research.v1"]
+    [visit] = await world.loop(llm).run()
+
+    assert (visit.outcome, visit.reason, visit.at_research) == (NotificationOutcome.PASSED, "Not my area.", True)
+    assert world.tool.queries == []
+    assert await store.get_research(world.agents["developer"].id, post.id) is None
+    assert _outcomes(await world.notifications("developer")) == [NotificationOutcome.PASSED]
 
 
-async def test_a_pass_at_the_decide_call_searches_but_writes_nothing() -> None:
+async def test_a_pass_at_the_decide_call_keeps_the_research(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
     llm = FakeLLM(rules=[_plans("developer", _RESEARCH), _decides("developer", _PASS)])
-    tool = _StubTool()
 
-    assert await _run(llm, tool=tool) == []
-    assert tool.queries == ["rust lang"]
-    assert _prompt_ids(llm) == ["research.v1", "decide.v1"]
+    [visit] = await world.loop(llm).run()
+
+    assert (visit.outcome, visit.reason, visit.at_research) == (NotificationOutcome.PASSED, "Nothing new.", False)
+    assert (await world.tree(post)).comments == ()
+    assert await store.get_research(world.agents["developer"].id, post.id) is not None
+    assert _outcomes(await world.notifications("developer")) == [NotificationOutcome.PASSED]
 
 
-async def test_with_no_agents_there_are_no_comments() -> None:
+async def test_research_is_done_once_and_reused_on_a_later_visit(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.loop(FakeLLM(rules=_comments("developer"))).run()
+    [comment] = (await world.tree(post)).comments
+    await world.reply(comment, "Are those downloads real?")
+    reply = SpeakDecision(reason="A question.", reply_to=[ReplyTo(place=2, point="Mostly CI.")])
+    llm = FakeLLM(rules=[_decides("developer", reply), _writes("developer", "Mostly CI.")])
+
+    [visit] = await world.loop(llm).run()
+
+    assert _calls(llm, "developer") == ["decide.v1", "developer.v1"]  # no research call
+    assert world.tool.queries == ["rust lang"]  # searched once, on the first visit
+    assert "https://example.com/x" in llm.calls[0].messages[0].content  # the saved report
+    assert (visit.outcome, visit.comments) == (NotificationOutcome.COMMENTED, (3,))
+    assert (await world.tree(post)).comments[2].parent_id == (await world.tree(post)).comments[1].id
+
+
+async def test_a_direct_question_is_new_to_the_agent_and_shown_in_full(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.loop(FakeLLM(rules=_comments("developer"))).run()
+    [comment] = (await world.tree(post)).comments
+    question = "@developer " + "is this real? " * 40
+    await world.reply(comment, question)
+    llm = FakeLLM(rules=[_decides("developer", _PASS)])
+
+    await world.loop(llm).run()
+
+    content = llm.calls[0].messages[0].content
+    assert "New to you: #2.\nA user asked you directly in #2." in content
+    assert question.strip() in content  # not cut, though it is a long reply
+
+
+async def test_every_notification_on_a_post_is_handled_in_one_visit_oldest_post_first(store: Store) -> None:
+    world = await _world(store)
+    first = await world.post("Rust")
+    second = await world.post("Go")
+    rules = [_plans("developer", _SKIP)]
+    await world.loop(FakeLLM(rules=rules)).run()  # both posts looked at and passed
+    # An agent that passed is only notified when mentioned: two mentions on the first post, one on the second.
+    await world.reply(first, "@developer what about crates?")
+    await world.reply(second, "@developer and Go modules?")
+    await world.reply(first, "@developer any numbers?")
+    llm = FakeLLM(rules=rules)
+
+    visits = await world.loop(llm).run()
+
+    assert [(v.post_id, v.notifications) for v in visits] == [(first.id, 2), (second.id, 1)]
+    assert "New to you: #1, #2.\nA user asked you directly in #1 and #2." in llm.calls[0].messages[0].content
+    assert all(n.outcome is NotificationOutcome.PASSED for n in await world.notifications("developer"))
+
+
+# Limits
+
+
+async def test_a_notification_in_a_full_thread_is_closed_without_an_ai_call(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    loop_llm = FakeLLM(rules=_comments("developer"))
+    await world.loop(loop_llm, max_comments_per_thread=1).run()
+    [comment] = (await world.tree(post)).comments
+    await world.reply(comment, "Not true.")  # in thread #1, which the agent has filled
     llm = FakeLLM()
 
-    comments = await check_post(
-        _POST, author=_ME, agents={}, llm=llm, roles=RoleRegistry(), tools=ToolRegistry(), settings=_settings()
+    [visit] = await world.loop(llm, max_comments_per_thread=1).run()
+
+    assert llm.calls == []
+    assert (visit.outcome, visit.reason) == (NotificationOutcome.LIMIT, "no place left on the post")
+    assert _outcomes(await world.notifications("developer")) == [
+        NotificationOutcome.COMMENTED,
+        NotificationOutcome.LIMIT,
+    ]
+
+
+async def test_only_the_notifications_in_a_full_thread_are_closed_and_the_others_acted_on(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.loop(FakeLLM(rules=_comments("developer")), max_comments_per_thread=1).run()
+    [comment] = (await world.tree(post)).comments
+    await world.reply(comment, "Not true.")  # #2, in the full thread #1
+    await world.reply(post, "Another view.")  # #3, a new thread
+    llm = FakeLLM(rules=[_decides("developer", _PASS)])
+
+    [visit] = await world.loop(llm, max_comments_per_thread=1).run()
+
+    assert (visit.outcome, visit.notifications) == (NotificationOutcome.PASSED, 2)
+    content = llm.calls[0].messages[0].content
+    assert "New to you: #3.\nYou can comment on: #3." in content
+    assert "You have reached your limit of 1 comments in thread #1." in content
+    assert _outcomes(await world.notifications("developer"))[1:] == [
+        NotificationOutcome.LIMIT,
+        NotificationOutcome.PASSED,
+    ]
+
+
+async def test_a_limit_visit_names_the_full_threads(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.loop(FakeLLM(rules=_comments("developer")), max_comments_per_thread=1).run()
+    [comment] = (await world.tree(post)).comments
+    await world.reply(post, "Another view.")  # #2, open to the agent
+    await world.store.close_notifications(
+        [n.id for n in await world.notifications("developer")], NotificationOutcome.SEEN
+    )
+    await world.reply(comment, "Not true.")
+
+    [visit] = await world.loop(FakeLLM(), max_comments_per_thread=1).run()
+
+    assert (visit.outcome, visit.reason) == (NotificationOutcome.LIMIT, "thread #1 is full")
+
+
+# Several agents and rounds
+
+
+async def test_two_agents_act_at_the_same_time(store: Store) -> None:
+    world = await _world(store, "first", "second")
+    post = await world.post()
+    started = {"first": asyncio.Event(), "second": asyncio.Event()}
+
+    class _Meeting(FakeLLM):
+        """Each agent's research call waits until the other's has started, which only works if both run at once."""
+
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            if request.prompt_id == "research.v1":
+                me, other = ("first", "second") if "You are the First" in request.system else ("second", "first")
+                started[me].set()
+                await asyncio.wait_for(started[other].wait(), timeout=5)
+            return await super().generate(request)
+
+    def later_look(request: LLMRequest) -> bool:  # on the other agent's comment, which notifies the one before it
+        return request.prompt_id == "decide.v1" and "New to you: the post" not in request.messages[0].content
+
+    llm = _Meeting(
+        rules=[(later_look, _PASS), *_comments("first", "First view."), *_comments("second", "Second view.")]
     )
 
-    assert comments == []
+    visits = await world.loop(llm).run()
+
+    commented = [v.agent.username for v in visits if v.outcome is NotificationOutcome.COMMENTED]
+    assert sorted(commented) == ["first", "second"]
+    assert sorted(c.text for c in (await world.tree(post)).comments) == ["First view.", "Second view."]
+
+
+async def test_comments_written_after_an_agent_stopped_start_another_round(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(store, "first", "second")
+    post = await world.post()
+    first_stopped = asyncio.Event()
+    visit = AgentLoop.visit
+
+    async def watched(self: AgentLoop, role: RoleSpec) -> Visit | None:
+        result = await visit(self, role)
+        if role.name == "first" and result is None:
+            first_stopped.set()
+        return result
+
+    monkeypatch.setattr(AgentLoop, "visit", watched)
+
+    class _Late(FakeLLM):
+        """The second agent starts only once the first has stopped, so its comment comes after."""
+
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            if request.prompt_id == "research.v1" and "You are the Second" in request.system:
+                await asyncio.wait_for(first_stopped.wait(), timeout=5)
+            return await super().generate(request)
+
+    def second_look(request: LLMRequest) -> bool:
+        return _by("decide.v1", "first")(request) and "New to you: #2." in request.messages[0].content
+
+    llm = _Late(rules=[(second_look, _PASS), *_comments("first"), *_comments("second")])
+
+    visits = await world.loop(llm).run()
+
+    # The second agent's top-level comment notified the first, which commented on the post, in a second round.
+    assert [(v.agent.username, v.outcome) for v in visits] == [
+        ("first", NotificationOutcome.COMMENTED),
+        ("second", NotificationOutcome.COMMENTED),
+        ("first", NotificationOutcome.PASSED),
+    ]
+    assert "New to you: #2." in llm.calls[-1].messages[0].content
+    for name in ("first", "second"):
+        assert all(not n.pending for n in await world.notifications(name))
+    assert len((await world.tree(post)).comments) == 2
+
+
+async def test_run_returns_at_once_when_nothing_is_pending(store: Store) -> None:
+    world = await _world(store)
+    llm = FakeLLM()
+
+    assert await world.loop(llm).run() == []
     assert llm.calls == []
 
 
-async def test_two_agents_both_comment_on_one_post_in_registration_order() -> None:
-    first, second = _role("first"), _role("second")
-    llm = FakeLLM(
-        rules=[
-            _plans("first", _RESEARCH),
-            _plans("second", _RESEARCH),
-            _decides("first", _COMMENT),
-            _decides("second", _COMMENT),
-            _writes("First view.", "first"),
-            _writes("Second view.", "second"),
-        ]
-    )
-    agents = _agents(first, second)
-
-    comments = await _run(llm, first, second, agents=agents)
-
-    assert [(c.author_id, c.text) for c in comments] == [
-        (agents["first"].id, "First view."),
-        (agents["second"].id, "Second view."),
-    ]
-    assert all((c.post_id, c.parent_id) == (_POST.id, _POST.id) for c in comments)
-    assert _prompt_ids(llm) == ["research.v1", "decide.v1", "developer.v1"] * 2
-
-
-async def test_a_later_agent_sees_the_earlier_comments_as_new_and_can_reply_to_them() -> None:
-    first, second = _role("first"), _role("second")
-    long = "First view, " + "with a long explanation " * 20
-    reply = SpeakDecision(reason="I disagree.", reply_to=[ReplyTo(place=1, point="Downloads are flat.")])
-    llm = FakeLLM(
-        rules=[
-            _plans("first", _RESEARCH),
-            _plans("second", _RESEARCH),
-            _decides("first", _COMMENT),
-            _decides("second", reply),
-            _writes(long, "first"),
-            _writes("No, flat.", "second"),
-        ]
-    )
-    agents = _agents(first, second)
-
-    top, answer = await _run(llm, first, second, agents=agents)
-
-    assert (answer.author_id, answer.parent_id, answer.post_id) == (agents["second"].id, top.id, _POST.id)
-    research, decide, write = llm.calls[3:]
-    overview = f"Post by me:\nRust\n\n  #1 first [AI]:\n  {long}"
-    assert research.messages[0].content == f"{overview}\n\nNew to you: the post, #1."
-    assert decide.messages[0].content.startswith(
-        f"{overview}\n\nNew to you: the post, #1.\nYou can comment on: 0 (a top-level comment on the post), #1."
-    )
-    # A reply is written from the thread it goes in, and says which comment it answers.
-    assert write.messages[0].content.startswith(f"{overview}\n\nTool results:")
-    assert write.messages[0].content.endswith("Your comment: a reply to #1.\nYour point: Downloads are flat.")
-
-
-async def test_several_places_are_written_in_order_from_the_discussion_the_decision_saw() -> None:
-    first, second = _role("first"), _role("second")
-    both = SpeakDecision(
-        reason="Two points.",
-        reply_to=[ReplyTo(place=1, point="Reply point."), ReplyTo(place=0, point="Own point.")],
-    )
-    llm = FakeLLM(
-        rules=[
-            _plans("first", _RESEARCH),
-            _plans("second", _RESEARCH),
-            _decides("first", _COMMENT),
-            _decides("second", both),
-            _writes("First view.", "first"),
-            (lambda r: _by("developer.v1", "second")(r) and "Reply point." in r.messages[0].content, "A reply."),
-            (lambda r: _by("developer.v1", "second")(r) and "Own point." in r.messages[0].content, "A view."),
-        ]
-    )
-
-    top, answer, view = await _run(llm, first, second)
-
-    assert [(c.text, c.parent_id) for c in (answer, view)] == [("A reply.", top.id), ("A view.", _POST.id)]
-    reply_write, view_write = llm.calls[-2:]
-    assert reply_write.messages[0].content.endswith("Your comment: a reply to #1.\nYour point: Reply point.")
-    # The top-level comment is written from the overview the decision saw, without the reply written just before.
-    assert "A reply." not in view_write.messages[0].content
-    assert view_write.messages[0].content.startswith("Post by me:\nRust\n\n  #1 first [AI]:\n  First view.\n\nTool")
-
-
-async def test_an_agent_after_a_pass_still_gets_its_look() -> None:
-    first, second, third = _role("first"), _role("second"), _role("third")
-    llm = FakeLLM(
-        rules=[
-            _plans("first", _SKIP),
-            _plans("second", _RESEARCH),
-            _plans("third", _RESEARCH),
-            _decides("second", _PASS),
-            _decides("third", _COMMENT),
-            _writes(),
-        ]
-    )
-    agents = _agents(first, second, third)
-
-    comments = await _run(llm, first, second, third, agents=agents)
-
-    assert [c.author_id for c in comments] == [agents["third"].id]
-
-
-async def test_each_plan_and_decision_is_logged_at_info_with_its_reason(caplog: pytest.LogCaptureFixture) -> None:
-    llm = FakeLLM(
-        rules=[
-            _plans("first", _SKIP),
-            _plans("second", _RESEARCH),
-            _decides("second", _COMMENT),
-            _writes(),
-        ]
-    )
+async def test_each_visit_is_reported_as_it_ends_and_logged(store: Store, caplog: pytest.LogCaptureFixture) -> None:
+    world = await _world(store)
+    post = await world.post()
+    seen: list[Visit] = []
 
     with caplog.at_level(logging.INFO, logger="techdebate.orchestrator"):
-        await _run(llm, _role("first"), _role("second"))
+        visits = await world.loop(FakeLLM(rules=[_plans("developer", _SKIP)])).run(on_visit=seen.append)
 
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, f"agent planned post_id={_POST.id} agent=first speak=False reason=Not my area."),
-        (logging.INFO, f"agent planned post_id={_POST.id} agent=second speak=True reason=In my area."),
-        (logging.INFO, f"agent decided post_id={_POST.id} agent=second reply_to=[0] reason=The data is new."),
-    ]
-
-
-# Errors
+    assert seen == visits
+    assert caplog.records[-1].getMessage() == (
+        f"agent visited post_id={post.id} agent=developer outcome=passed notifications=1 comments=[] "
+        "reason=Not my area."
+    )
 
 
-async def test_a_bad_prompt_id_fails_before_any_llm_call() -> None:
-    llm = FakeLLM(rules=[_plans("first", _SKIP)])
-
-    with pytest.raises(PromptError, match="invalid prompt ID"):
-        await _run(llm, _role("first"), _role("second", prompt_id="malformed"))
-
-    assert llm.calls == []
+# Failures and cost
 
 
-async def test_an_agent_can_still_comment_when_every_tool_fails() -> None:
+async def test_a_failed_visit_is_closed_as_failed_and_the_other_agents_go_on(store: Store) -> None:
+    world = await _world(store, "first", "second")
+    post = await world.post()
+    llm = FakeLLM(rules=[_plans("first", _RESEARCH), *_comments("second")])  # no decide reply for the first
+
+    visits = {v.agent.username: v for v in await world.loop(llm).run()}
+
+    assert visits["first"].outcome is NotificationOutcome.FAILED
+    assert "no scripted reply" in visits["first"].reason
+    assert visits["second"].outcome is NotificationOutcome.COMMENTED
+    assert _outcomes(await world.notifications("first")) == [NotificationOutcome.FAILED]
+    assert await store.get_research(world.agents["first"].id, post.id) is not None  # saved before the decide call
+
+
+async def test_a_visit_that_fails_after_a_comment_keeps_it(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.reply(post, "My view.")  # #1, by me
+    both = SpeakDecision(
+        reason="Two points.", reply_to=[ReplyTo(place=0, point="Own."), ReplyTo(place=1, point="Answer.")]
+    )
     llm = FakeLLM(
         rules=[
             _plans("developer", _RESEARCH),
-            _decides("developer", _COMMENT),
-            _writes("It is widely used."),
+            _decides("developer", both),
+            (lambda r: _by("developer.v1", "developer")(r) and "Own." in r.messages[0].content, "My own view."),
         ]
     )
 
-    [comment] = await _run(llm, tool=_StubTool(error=ToolError("stub: down")))
+    [visit] = await world.loop(llm).run()
 
-    assert comment.text == "It is widely used."
-    for call in llm.calls[1:]:  # the decide and the write calls
-        assert 'stub, query "rust lang": the tool failed' in call.messages[0].content
-
-
-async def test_an_agent_that_researches_with_no_queries_decides_without_calling_a_tool() -> None:
-    no_tools = ResearchPlan(speak=True, queries={"stub": []}, reason="Nothing to search.")
-    llm = FakeLLM(
-        rules=[
-            _plans("developer", no_tools),
-            _decides("developer", _COMMENT),
-            _writes("It is widely used."),
-        ]
-    )
-    tool = _StubTool()
-
-    [comment] = await _run(llm, tool=tool)
-
-    assert comment.text == "It is widely used."
-    assert tool.queries == []
-    assert llm.calls[1].messages[0].content.endswith("stub: not used")
+    assert (visit.outcome, visit.comments) == (NotificationOutcome.FAILED, (2,))
+    assert [c.text for c in (await world.tree(post)).comments] == ["My view.", "My own view."]
 
 
-async def test_an_llm_error_goes_up() -> None:
-    with pytest.raises(LLMError, match="no scripted reply"):
-        await _run(FakeLLM())
+async def test_an_agent_still_comments_when_every_tool_fails(store: Store) -> None:
+    world = await _world(store, tool=_StubTool(error=ToolError("stub: down")))
+    await world.post()
+    llm = FakeLLM(rules=_comments("developer", "It is widely used."))
+
+    [visit] = await world.loop(llm).run()
+
+    assert visit.outcome is NotificationOutcome.COMMENTED
+    assert 'stub, query "rust lang": the tool failed' in llm.calls[1].messages[0].content
 
 
-# Cost
+async def test_a_bad_prompt_id_fails_before_any_ai_call(store: Store) -> None:
+    world = await _world(store, "first")
+    world.roles = RoleRegistry([_role("first"), _role("second", prompt_id="malformed")])
+    llm = FakeLLM()
+
+    with pytest.raises(PromptError, match="invalid prompt ID"):
+        world.loop(llm)
+
+    assert llm.calls == []
 
 
-async def test_a_meter_passed_in_counts_both_cheap_calls_and_the_write() -> None:
-    meter = CostMeter(
-        _PricedLLM(
-            rules=[
-                _plans("first", _SKIP),
-                _plans("second", _RESEARCH),
-                _decides("second", _COMMENT),
-                _writes(),
-            ]
-        )
-    )
+async def test_a_visit_costs_its_stored_calls(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
 
-    await _run(meter, _role("first"), _role("second"))
+    [visit] = await world.loop(_PricedLLM(rules=_comments("developer"))).run()
 
-    assert meter.total_usd == pytest.approx(0.01 + 0.01 + 0.02 + 0.25)
-
-
-async def test_a_meter_passed_in_counts_both_cheap_calls_when_the_agent_passes() -> None:
-    meter = CostMeter(_PricedLLM(rules=[_plans("developer", _RESEARCH), _decides("developer", _PASS)]))
-
-    assert await _run(meter) == []
-    assert meter.total_usd == pytest.approx(0.03)
+    assert visit.cost_usd == pytest.approx(0.01 + 0.02 + 0.25)
+    assert sum(c.cost_usd for c in await store.list_llm_calls(post.id)) == pytest.approx(visit.cost_usd)
