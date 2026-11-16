@@ -90,8 +90,11 @@ class Settings(BaseSettings):
     # The real user who writes from the command line. Each agent's username is its role's name.
     username: str = "me"
 
-    post_budget_usd: float = 0.50
-    daily_budget_usd: float = 5.00
+    # Spending caps in USD: per post, per agent per day, and for all agents per day. The days are UTC days. At $2.00
+    # one agent can take at most 40% of the day, so an agent that runs away cannot silence the others.
+    post_budget_usd: float = Field(default=0.50, ge=0)
+    agent_budget_usd: float = Field(default=2.00, ge=0)
+    daily_budget_usd: float = Field(default=5.00, ge=0)
 
     # The SQLite database, relative to the directory a command runs in (like .env). Created on first use.
     db_path: str = "techdebate.db"

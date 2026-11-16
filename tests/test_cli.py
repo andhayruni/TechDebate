@@ -2,8 +2,10 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import signal
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from techdebate.llm.fake import Predicate, Reply
 from techdebate.logging_setup import setup_logging
 from techdebate.models import (
     Evidence,
+    LLMCall,
     Message,
     Notification,
     NotificationOutcome,
@@ -844,6 +847,111 @@ def test_run_on_a_post_out_of_budget_makes_no_ai_call(
     ]
     assert err == "visits=3 comments=0 cost=$0.000000\n"
     assert llm.calls == []
+
+
+def _spend(db_path: Path, username: str, post: Message, cost_usd: float, at: datetime | None = None) -> None:
+    """An AI call the agent made on the post, stored as if made at `at` (now by default)."""
+
+    async def add() -> None:
+        async with open_store(_db_settings(db_path)) as store:
+            agent = await store.find_user(username)
+            assert agent is not None
+            call = LLMCall(
+                agent_id=agent.id,
+                post_id=post.id,
+                prompt_id="developer.v1",
+                model="m",
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=cost_usd,
+                duration_s=0.1,
+                created_at=at or datetime.now(UTC),
+            )
+            await store.add_llm_call(call)
+
+    asyncio.run(add())
+
+
+_RESETS = r"^Today \(UTC, resets in ([0-9]|1[0-9]|2[0-3])h [0-5]?[0-9]m\):$"
+
+
+def test_budget_with_no_post_prints_today_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+
+    cli.main(["budget"])
+
+    out, err = capsys.readouterr()
+    first, *rows = out.splitlines()
+    assert re.match(_RESETS, first)
+    assert rows == [
+        "  all agents      $0.0000 of $5.00   $5.0000 left",
+        "  Developer [AI]  $0.0000 of $2.00   $2.0000 left",
+        "  Scientist [AI]  $0.0000 of $2.00   $2.0000 left",
+        "  Pollster [AI]   $0.0000 of $2.00   $2.0000 left",
+    ]
+    assert err == "spent_today=$0.000000\n"
+
+
+def test_budget_prints_today_and_the_newest_post_or_another(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path, agent_budget_usd=0.30, post_budget_usd=0.50)
+    cli.main(["post", "Is Rust growing?"])
+    cli.main(["post", "Is Go growing?"])
+    go, rust = _posts(db_path)
+    _spend(db_path, "developer", rust, 0.20)
+    _spend(db_path, "developer", go, 0.15)  # the developer's day is used up
+    _spend(db_path, "scientist", rust, 0.3125)  # and the scientist's
+    _spend(
+        db_path, "pollster", rust, 1.25, at=datetime.now(UTC) - timedelta(days=1)
+    )  # not today, though the Rust post counts it
+    capsys.readouterr()
+
+    cli.main(["budget"])
+
+    out, err = capsys.readouterr()
+    first, *rows = out.splitlines()
+    assert re.match(_RESETS, first)
+    assert rows == [
+        "  all agents      $0.6625 of $5.00   $4.3375 left",
+        "  Developer [AI]  $0.3500 of $0.30   used up",
+        "  Scientist [AI]  $0.3125 of $0.30   used up",
+        "  Pollster [AI]   $0.0000 of $0.30   $0.3000 left",
+        "Post " + go.id[:8] + ":    $0.1500 of $0.50   $0.3500 left",
+    ]
+    assert err == f"spent_today=$0.662500 post={go.id[:8]}\n"
+
+    cli.main(["budget", "--post", rust.id[:6].upper()])
+
+    out, err = capsys.readouterr()
+    assert out.splitlines()[-1] == "Post " + rust.id[:8] + ":    $1.7625 of $0.50   used up"
+    assert err == f"spent_today=$0.662500 post={rust.id[:8]}\n"
+
+
+def test_budget_on_an_unknown_post_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["budget", "--post", "3f2a"])
+
+    assert raised.value.code == 1
+    assert capsys.readouterr().err == 'error: there is no post yet: create one with techdebate post "<text>"\n'
+
+
+@pytest.mark.parametrize(
+    ("left", "shown"),
+    [
+        (timedelta(hours=23, minutes=59, seconds=59), "23h 59m"),
+        (timedelta(minutes=5), "0h 5m"),
+        (timedelta(0), "0h 0m"),
+    ],
+)
+def test_the_time_until_the_budgets_reset(left: timedelta, shown: str) -> None:
+    assert cli._duration(left) == shown  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(

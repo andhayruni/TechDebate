@@ -3,7 +3,8 @@
 `techdebate post`, `posts`, `comment`, `reply`, `show` and `notifications` take part in the discussions stored in the
 database, as the user in `username`. A post is named by its short ID, the start of its ID, and the commands that work on
 one post take `--post`. `techdebate run` lets the agents act on their notifications until none is pending, and
-`techdebate agents` keeps them running until Ctrl-C. `techdebate ask "<question>"` checks the LLM setup, and
+`techdebate agents` keeps them running until Ctrl-C. `techdebate budget` prints what the budgets have spent and what is
+left. `techdebate ask "<question>"` checks the LLM setup, and
 `techdebate evidence <tool> "<query>"` runs one evidence tool.
 """
 
@@ -17,11 +18,21 @@ import textwrap
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from techdebate.config import Settings, get_settings
-from techdebate.errors import CommandError, TechDebateError
+from techdebate.errors import CommandError, TechDebateError, usd_limit
 from techdebate.forum import Forum
-from techdebate.llm import AnthropicLLM, LLMClient, LLMRequest, LLMResponse, ModelTier
+from techdebate.llm import (
+    AnthropicLLM,
+    BudgetScope,
+    LLMClient,
+    LLMRequest,
+    LLMResponse,
+    ModelTier,
+    budget_scopes,
+    end_of_day,
+)
 from techdebate.llm import Message as LLMMessage
 from techdebate.logging_setup import setup_logging
 from techdebate.models import Evidence, Message, Notification, NotificationOutcome, NotificationReason, User
@@ -170,6 +181,53 @@ async def _show_command(settings: Settings, post_ref: str | None = None) -> tupl
         tree = await _tree(session.store, post)
         users = {user.id: user for user in await session.store.list_users()}
         return post, _format_discussion(tree, users), len(tree.comments)
+
+
+@dataclass(frozen=True)
+class _BudgetReport:
+    text: str
+    spent_today: float  # by all agents
+    post: Message | None  # the post shown, None when there is none yet
+
+
+async def _budget_command(settings: Settings, post_ref: str | None = None) -> _BudgetReport:
+    """Today's spending for all agents and for each agent, then one post's: the newest, or the one `post_ref` names.
+    With no post yet the post line is left out."""
+    async with _session(settings) as session:
+        store = session.store
+        now = datetime.now(UTC)
+        scopes = {scope.name: scope for scope in budget_scopes(settings)}
+        day, per_agent, per_post = scopes["day"], scopes["agent"], scopes["post"]
+
+        spent_today = await day.spent_usd(store, now=now)
+        today = [("all agents", spent_today, day)]
+        for agent in session.agents.values():
+            today.append((shown_name(agent), await per_agent.spent_usd(store, agent_id=agent.id, now=now), per_agent))
+        post = None
+        if post_ref is not None or await store.list_posts():  # an unknown --post fails even with no post yet
+            post = await _find_post(store, post_ref)
+
+        labelled = [(f"  {label}", spent, scope) for label, spent, scope in today]
+        if post is not None:
+            labelled.append((f"Post {short_id(post.id)}:", await per_post.spent_usd(store, post_id=post.id), per_post))
+        label_width = max(len(label) for label, _, _ in labelled)
+        amounts = [f"${spent:.4f} of {usd_limit(scope.limit_usd)}" for _, spent, scope in labelled]
+        amount_width = max(len(amount) for amount in amounts)
+        rows = [
+            f"{label:<{label_width}}  {amount:<{amount_width}}   {_left(spent, scope)}"
+            for (label, spent, scope), amount in zip(labelled, amounts, strict=True)
+        ]
+        lines = [f"Today (UTC, resets in {_duration(end_of_day(now) - now)}):", *rows]
+        return _BudgetReport(text="\n".join(lines), spent_today=spent_today, post=post)
+
+
+def _left(spent: float, scope: BudgetScope) -> str:
+    return "used up" if scope.used_up(spent) else f"${scope.limit_usd - spent:.4f} left"
+
+
+def _duration(left: timedelta) -> str:
+    minutes = int(left.total_seconds()) // 60
+    return f"{minutes // 60}h {minutes % 60}m"
 
 
 def _agent_loop(session: _Session, settings: Settings) -> AgentLoop:
@@ -358,6 +416,11 @@ def _build_parser() -> argparse.ArgumentParser:
     reply.add_argument("number", type=int, metavar="n", help="The number of the comment to answer, as show prints it")
     reply.add_argument("text", help="The text of the reply")
     sub.add_parser("show", parents=[common, on_post], help="Print a post and its threads")
+    sub.add_parser(
+        "budget",
+        parents=[common, on_post],
+        help="Print what the agents have spent today and on a post, and what is left",
+    )
     notifications = sub.add_parser(
         "notifications", parents=[common], help="List my pending notifications and mark them as seen"
     )
@@ -405,6 +468,11 @@ def _run(args: argparse.Namespace) -> None:
         post, text, count = asyncio.run(_show_command(get_settings(), args.post))
         print(text)
         print(f"post={short_id(post.id)} comments={count}", file=sys.stderr)
+    if args.command == "budget":
+        report = asyncio.run(_budget_command(get_settings(), args.post))
+        print(report.text)
+        post = "" if report.post is None else f" post={short_id(report.post.id)}"
+        print(f"spent_today=${report.spent_today:.6f}{post}", file=sys.stderr)
     if args.command == "notifications":
         count = asyncio.run(_notifications_command(get_settings(), include_closed=args.all, post_ref=args.post))
         print(f"notifications={count}", file=sys.stderr)

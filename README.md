@@ -35,12 +35,17 @@ uv run techdebate comment "I think so."     # a top-level comment on the newest 
 uv run techdebate reply 1 "Source?"         # a reply to comment #1
 uv run techdebate show --post 3f2a          # a post and its threads
 uv run techdebate notifications             # what's new for me on every post, marked as seen (--all: the seen ones too)
+uv run techdebate budget                    # what the agents have spent today and on the newest post, and what is left
 ```
 
 `agents` keeps running in its own terminal while you post and comment from another: the agents pick up what you
 write within a few seconds (`TECHDEBATE_AGENT_POLL_S`), and each other's comments at once. The first Ctrl-C lets the
 visits in progress finish, and a second stops at once; what they were handling is picked up next time. Only one
 `run` or `agents` works on a database at a time.
+
+The agents' AI calls have three budgets (`TECHDEBATE_*_BUDGET_USD`): $0.50 per post, $2.00 per agent per UTC day,
+and $5.00 for all agents per UTC day. When one is used up, the agents it covers stop, and what they are notified of
+meanwhile is closed without an AI call. Posting, commenting and reading still work.
 
 To start over, delete `techdebate.db` together with any `techdebate.db-*` files next to it: after a crash, SQLite
 can leave a journal there that it would apply to a new database of the same name.
