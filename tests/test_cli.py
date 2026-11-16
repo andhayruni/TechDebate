@@ -700,6 +700,24 @@ def test_run_records_a_failed_call_and_carries_on(
     assert capsys.readouterr().err == "visits=0 comments=0 cost=$0.000000\n"
 
 
+def test_run_on_a_post_out_of_budget_makes_no_ai_call(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _use_db(monkeypatch, tmp_path, post_budget_usd=0.0)
+    cli.main(["post", "Is Rust growing?"])
+    llm = FakeLLM()
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+    capsys.readouterr()
+
+    cli.main(["run"])
+
+    out, err = capsys.readouterr()
+    line = "out of budget: the post has spent $0.0000 of its $0.00 budget"
+    assert sorted(out.splitlines()) == [f"{name} [AI] {line}" for name in ("Developer", "Pollster", "Scientist")]
+    assert err == "visits=3 comments=0 cost=$0.000000\n"
+    assert llm.calls == []
+
+
 @pytest.mark.parametrize(
     ("outcome", "reason", "at_research", "comments", "line"),
     [
@@ -709,6 +727,8 @@ def test_run_records_a_failed_call_and_carries_on(
         (NotificationOutcome.LIMIT, "thread #1 is full", False, (), "Developer [AI] at its limit: thread #1 is full"),
         (NotificationOutcome.FAILED, "down", False, (), "Developer [AI] failed: down"),
         (NotificationOutcome.FAILED, "down", False, (3,), "Developer [AI] failed after writing #3: down"),
+        (NotificationOutcome.BUDGET, "spent", False, (), "Developer [AI] out of budget: spent"),
+        (NotificationOutcome.BUDGET, "spent", False, (3,), "Developer [AI] out of budget after writing #3: spent"),
     ],
 )
 def test_a_visit_line_names_the_agent_and_what_it_did(

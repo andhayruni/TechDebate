@@ -486,6 +486,66 @@ async def test_a_bad_prompt_id_fails_before_any_ai_call(store: Store) -> None:
     assert llm.calls == []
 
 
+# The post budget
+
+
+async def test_the_agent_stops_when_the_post_budget_is_used_up(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    llm = _PricedLLM(rules=_comments("developer"))
+
+    # The research call ($0.01) and the decide call ($0.02) pass the check, and the write call finds $0.03 spent.
+    [visit] = await world.loop(llm, post_budget_usd=0.02).run()
+
+    assert (visit.outcome, visit.comments) == (NotificationOutcome.BUDGET, ())
+    assert visit.reason == "the post has spent $0.0300 of its $0.02 budget"
+    assert visit.cost_usd == pytest.approx(0.03)
+    assert _calls(llm, "developer") == ["research.v1", "decide.v1"]
+    assert _outcomes(await world.notifications("developer")) == [NotificationOutcome.BUDGET]
+    assert await store.get_research(world.agents["developer"].id, post.id) is not None
+    assert (await world.tree(post)).comments == ()
+
+
+async def test_later_notifications_on_a_post_out_of_budget_cost_nothing_and_i_can_still_comment(
+    store: Store,
+) -> None:
+    world = await _world(store, "first", "second")
+    post = await world.post()
+    llm = _PricedLLM(rules=[*_comments("first"), *_comments("second")])
+    await world.loop(llm, post_budget_usd=0.02).run()
+    calls = len(llm.calls)
+
+    mine = await world.reply(post, "@first @second what about the downloads?")
+    visits = await world.loop(llm, post_budget_usd=0.02).run()
+
+    assert len(llm.calls) == calls  # no AI call
+    assert {(v.agent.username, v.outcome, v.notifications) for v in visits} == {
+        ("first", NotificationOutcome.BUDGET, 1),
+        ("second", NotificationOutcome.BUDGET, 1),
+    }
+    assert all(v.reason.startswith("the post has spent") for v in visits)
+    for name in ("first", "second"):
+        assert _outcomes(await world.notifications(name)) == [NotificationOutcome.BUDGET] * 2
+    assert (await world.tree(post)).comments == (mine,)
+
+
+async def test_a_visit_stopped_by_the_budget_keeps_the_comments_it_wrote(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.reply(post, "My view.")  # #1, by me
+    both = SpeakDecision(
+        reason="Two points.", reply_to=[ReplyTo(place=0, point="Own."), ReplyTo(place=1, point="Answer.")]
+    )
+    llm = _PricedLLM(rules=[_plans("developer", _RESEARCH), _decides("developer", both), _writes("developer")])
+
+    # $0.03 before the first write, $0.28 after it.
+    [visit] = await world.loop(llm, post_budget_usd=0.27).run()
+
+    assert (visit.outcome, visit.comments) == (NotificationOutcome.BUDGET, (2,))
+    assert _calls(llm, "developer") == ["research.v1", "decide.v1", "developer.v1"]
+    assert [c.text for c in (await world.tree(post)).comments] == ["My view.", "Developers use it."]
+
+
 async def test_a_visit_costs_its_stored_calls(store: Store) -> None:
     world = await _world(store)
     post = await world.post()

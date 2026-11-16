@@ -2,8 +2,8 @@
 time, and the agents act at the same time, so the order of the comments comes out of that.
 
 A visit takes the agent's oldest pending notification, with its other pending notifications on the same post. It closes
-the ones the agent may not act on, researches the post if the agent has not yet, decides where to comment, writes, and
-closes the notifications with what happened."""
+them all when the post is out of budget, closes the ones the agent may not act on, researches the post if the agent has
+not yet, decides where to comment, writes, and closes the notifications with what happened."""
 
 import asyncio
 import logging
@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 
 from techdebate.analyst import Analyst, News
 from techdebate.config import Settings
-from techdebate.errors import LLMError
+from techdebate.errors import BudgetExceeded, LLMError
 from techdebate.forum import Forum
-from techdebate.llm import LLMClient, RecordingLLM
+from techdebate.llm import Budget, LLMClient, RecordingLLM, post_scopes
 from techdebate.models import (
     Message,
     Notification,
@@ -117,8 +117,24 @@ class AgentLoop:
         assert found is not None, "a notification's post is saved before it"
         tree = Tree.of(found)
         places = places_for(tree, agent.id, max_per_thread=self._settings.max_comments_per_thread)
+        recording = RecordingLLM(self._llm, self._store, agent=agent, post_id=post_id)
+        llm = Budget(recording, self._store, post_scopes(self._settings), agent=agent, post_id=post_id)
 
-        # Step 1: no AI call for what the agent may not act on.
+        # Step 1: no AI call for what the agent may not act on. A budget used up closes the whole post, so it comes
+        # before the limits.
+        try:
+            await llm.check()
+        except BudgetExceeded as e:
+            await self._store.close_notifications([n.id for n in notifications], NotificationOutcome.BUDGET)
+            return _logged(
+                Visit(
+                    agent=agent,
+                    post_id=post_id,
+                    outcome=NotificationOutcome.BUDGET,
+                    reason=str(e),
+                    notifications=len(notifications),
+                )
+            )
         closed = [n for n in notifications if _in_full_thread(tree, places, n)]
         active = [n for n in notifications if n not in closed]
         await self._store.close_notifications([n.id for n in closed], NotificationOutcome.LIMIT)
@@ -133,13 +149,14 @@ class AgentLoop:
                 )
             )
 
-        llm = RecordingLLM(self._llm, self._store, agent=agent, post_id=post_id)
         acted = _Acted()
         try:
             await self._act(Analyst(role, llm, self._tools, self._settings), agent, tree, places, active, acted)
         except LLMError as e:
             log.warning("visit failed post_id=%s agent=%s error=%s", post_id, role.name, e)
             acted.outcome, acted.reason = NotificationOutcome.FAILED, str(e)
+        except BudgetExceeded as e:
+            acted.outcome, acted.reason = NotificationOutcome.BUDGET, str(e)
         await self._store.close_notifications([n.id for n in active], acted.outcome)
 
         comments: tuple[int, ...] = ()
@@ -156,7 +173,7 @@ class AgentLoop:
                 notifications=len(notifications),
                 comments=comments,
                 at_research=acted.at_research,
-                cost_usd=llm.total_usd,
+                cost_usd=recording.total_usd,
             )
         )
 
@@ -169,7 +186,8 @@ class AgentLoop:
         notifications: Sequence[Notification],
         acted: _Acted,
     ) -> None:
-        """Steps 2 to 4: research once, decide, and write. LLMError goes up, with `acted` as far as it got."""
+        """Steps 2 to 4: research once, decide, and write. LLMError and BudgetExceeded go up, with `acted` as far as
+        it got."""
         post_id = tree.post.id
         messages = {message.id: message for message in (tree.post, *tree.comments)}
         about = [messages[notification.message_id] for notification in notifications]

@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -222,6 +223,30 @@ async def test_cost_uses_price_table() -> None:
     response = await _llm(_reply(_message("hi", model="claude-sonnet-5-5"))).generate(_request(ModelTier.STRONG))
     # 1,000 input at $2/MTok + 200 output at $10/MTok
     assert response.cost_usd == pytest.approx(0.004)
+
+
+async def test_cost_uses_the_price_of_the_model_that_answered(caplog: pytest.LogCaptureFixture) -> None:
+    # Sonnet was asked for, Haiku answered: 1,000 input at $0.10/MTok + 200 output at $0.50/MTok
+    response = await _llm(_reply(_message("hi", model="claude-haiku-5-5"))).generate(_request(ModelTier.STRONG))
+
+    assert response.model == "claude-haiku-5-5"
+    assert response.cost_usd == pytest.approx(0.0002)
+    assert "priced by the requested model" not in caplog.text
+
+
+async def test_an_answering_model_without_a_price_is_priced_as_requested_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    llm = _llm(_reply(_message("hi", model="claude-sonnet-5-5-20261001")))
+
+    with caplog.at_level(logging.WARNING, logger="techdebate"):
+        first = await llm.generate(_request(ModelTier.STRONG))
+        second = await llm.generate(_request(ModelTier.STRONG))
+
+    assert first.model == "claude-sonnet-5-5-20261001"
+    assert first.cost_usd == second.cost_usd == pytest.approx(0.004)  # Sonnet's price
+    line = "llm priced by the requested model requested=claude-sonnet-5-5 answered=claude-sonnet-5-5-20261001"
+    assert caplog.messages == [line, line]  # on every such call
 
 
 def test_cost_usd() -> None:

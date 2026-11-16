@@ -241,6 +241,16 @@ async def test_llm_calls_are_listed_per_post_oldest_first(store: Store) -> None:
     assert await store.list_llm_calls("unknown") == []
 
 
+async def test_spent_is_the_cost_of_the_calls_on_the_post(store: Store) -> None:
+    developer, post, other = await _two_posts(store)
+    for cost, on in [(0.25, post), (0.01, other), (0.02, post)]:
+        await store.add_llm_call(_call(developer, on, "decide.v1").model_copy(update={"cost_usd": cost}))
+
+    assert await store.spent_usd(post_id=post.id) == pytest.approx(0.27)
+    assert await store.spent_usd(post_id=other.id) == pytest.approx(0.01)
+    assert await store.spent_usd(post_id="unknown") == 0.0
+
+
 async def test_an_llm_call_needs_a_known_agent_and_post(store: Store) -> None:
     developer, post, _ = await _two_posts(store)
 
