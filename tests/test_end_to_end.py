@@ -1,246 +1,298 @@
-"""`techdebate post` and then `techdebate run` with no network: only the model and the HTTP responses are replaced,
-and the database is a temporary file."""
+"""A whole discussion on one post, through the commands and with no network: the model is scripted, the sources answer
+from recorded fixtures, and the database is a temporary file.
 
-from collections.abc import Callable
+The agents act at the same time, so the AI answers are matched by agent and call, not by order. Only the order in which
+the first two top-level comments are saved is fixed, since the rest of the discussion depends on it. Everything after
+that is ordered by the discussion itself: each reply waits for the comment it answers."""
+
+import asyncio
+from collections import Counter
 from pathlib import Path
+from typing import cast
 
 import pytest
 import respx
+from respx.models import Call
 
 from techdebate import cli
 from techdebate.config import Settings
+from techdebate.forum import Forum
 from techdebate.llm import FakeLLM, LLMRequest
 from techdebate.llm.fake import Predicate, Reply
-from techdebate.models import ReplyTo, ResearchPlan, SpeakDecision
-
-_RESEARCH = ResearchPlan(
-    speak=True,
-    queries={"github_search": ["httpx"], "github_repo": ["httpx"], "pypi": ["httpx"]},
-    reason="Developers use this.",
+from techdebate.models import (
+    Message,
+    Notification,
+    NotificationOutcome,
+    ReplyTo,
+    ResearchPlan,
+    SpeakDecision,
+    User,
 )
-_NO_PYPI = ResearchPlan(
-    speak=True,
-    queries={"github_search": ["httpx"], "github_repo": ["httpx"], "pypi": []},
-    reason="Developers use this, but it is not a package.",
-)
-_SKIP = ResearchPlan(speak=False, queries={"github_search": [], "github_repo": [], "pypi": []}, reason="Not my area.")
-_COMMENT_ON_POST = SpeakDecision(
-    reason="The download numbers are new.", reply_to=[ReplyTo(place=0, point="Downloads are heavy.")]
-)
-_NOTHING_NEW = SpeakDecision(reason="The results only repeat the post.", reply_to=[])
-_OVERVIEW = "Post by me:\nhttpx\n\n  No comments yet."
-_DECIDE_BLOCK = "New to you: the post.\nYou can comment on: 0 (a top-level comment on the post)."
-_COMMENT = "Developers use it, with [heavy downloads](https://pypistats.org/packages/httpx)."
+from techdebate.store import open_store
+
+_AGENTS = ("Developer", "Scientist", "Pollster")
+_WRITE_PROMPTS = {agent: f"{agent.lower()}.v1" for agent in _AGENTS}
+
+# The comments, by number, as the scenario writes them.
+_TEXT = {
+    1: "Developers build on it: [httpx on PyPI](https://pypi.org/project/httpx/) has heavy downloads.",
+    2: "Researchers hardly write about HTTP clients: [one paper](https://arxiv.org/abs/2010.11929) is all I found.",
+    3: "Few papers is expected: libraries like this show up in code, not in titles.",
+    4: "Agreed, so my counts say nothing about its use, only that it is not a research topic.",
+    5: "Then the download numbers are the measure to watch here.",
+    6: "@pollster is the public watching videos about it?",
+    7: "Some are: [videos](https://www.youtube.com/results?search_query=httpx) get steady views.",
+}
 
 
-def _is(agent: str, prompt_id: str) -> Callable[[LLMRequest], bool]:
-    """A call of one agent: every prompt starts with the agent's display name."""
+def _call(agent: str, prompt_id: str, *contains: str) -> Predicate:
+    """A call of one agent: every prompt starts with the agent's display name. With `contains`, the user message must
+    hold one of them, which tells apart the calls an agent makes more than once."""
 
     def matches(request: LLMRequest) -> bool:
-        return request.prompt_id == prompt_id and request.system.startswith(f"You are the {agent},")
+        content = request.messages[-1].content
+        return (
+            request.prompt_id == prompt_id
+            and request.system.startswith(f"You are the {agent},")
+            and (not contains or any(text in content for text in contains))
+        )
 
     return matches
 
 
-def _is_research(request: LLMRequest) -> bool:
-    return _is("Developer", "research.v1")(request)
+def _comment(agent: str, place: int, number: int, point: str) -> list[tuple[Predicate, Reply]]:
+    """A decide call that picks one place, and the write call there, which becomes comment #number."""
+    new = "the post" if place == 0 else f"#{place}"
+    where = "a top-level comment on the post" if place == 0 else f"a reply to #{place}"
+    return [
+        (
+            _call(agent, "decide.v1", f"New to you: {new}."),
+            SpeakDecision(reason="Something new to add.", reply_to=[ReplyTo(place=place, point=point)]),
+        ),
+        (_call(agent, _WRITE_PROMPTS[agent], f"Your comment: {where}."), _TEXT[number]),
+    ]
 
 
-def _is_decide(request: LLMRequest) -> bool:
-    return _is("Developer", "decide.v1")(request)
-
-
-def _is_write(request: LLMRequest) -> bool:
-    return _is("Developer", "developer.v1")(request)
-
-
-# The Scientist and the Pollster look at every post too. Unless a test says otherwise, they pass at the research call,
-# so they make no request.
-_OTHERS_PASS: list[tuple[Predicate, Reply]] = [
-    (_is("Scientist", "research.v1"), ResearchPlan(speak=False, queries={"arxiv": []}, reason="No research angle.")),
-    (_is("Pollster", "research.v1"), ResearchPlan(speak=False, queries={"youtube": []}, reason="Not a public topic.")),
+_SCRIPT: list[tuple[Predicate, Reply]] = [
+    # The first run: the Developer and the Scientist research and comment on the post, and the Pollster passes.
+    (
+        _call("Developer", "research.v1"),
+        ResearchPlan(
+            speak=True,
+            queries={"github_search": ["httpx"], "github_repo": ["httpx"], "pypi": ["httpx"]},
+            reason="Developers use it.",
+        ),
+    ),
+    (
+        _call("Scientist", "research.v1"),
+        ResearchPlan(speak=True, queries={"arxiv": ["http client"]}, reason="There may be papers."),
+    ),
+    (
+        _call("Pollster", "research.v1", "New to you: the post."),
+        ResearchPlan(speak=False, queries={"youtube": []}, reason="Not a public topic."),
+    ),
+    *_comment("Developer", 0, 1, "Downloads are heavy."),
+    *_comment("Scientist", 0, 2, "Few papers."),
+    # The two answer each other in thread #2, until the Scientist's thread is full.
+    *_comment("Developer", 2, 3, "Libraries show up in code."),
+    *_comment("Scientist", 3, 4, "So the counts only show it is not a research topic."),
+    *_comment("Developer", 4, 5, "Downloads are the measure."),
+    # The second run: my mention brings the Pollster in, and the Developer has nothing new.
+    (
+        _call("Pollster", "research.v1", "New to you: #6.\nA user asked you directly in #6."),
+        ResearchPlan(speak=True, queries={"youtube": ["httpx"]}, reason="A user asked me."),
+    ),
+    *_comment("Pollster", 6, 7, "Videos get steady views."),
+    (
+        _call("Developer", "decide.v1", "New to you: #6.", "New to you: #6, #7.", "New to you: #7."),
+        SpeakDecision(reason="The question is for the Pollster.", reply_to=[]),
+    ),
 ]
 
 
-@pytest.fixture(autouse=True)
-def _no_local_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # pyright: ignore[reportUnusedFunction]
+@pytest.fixture
+def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
     """A local .env can't change the result. With a YouTube key every agent takes part, and arXiv's spacing between
-    requests is off. The database is a temporary file."""
-    db_path = str(tmp_path / "techdebate.db")
-    settings = Settings(_env_file=None, YOUTUBE_API_KEY="key", arxiv_request_interval_s=0, db_path=db_path)  # pyright: ignore[reportCallIssue]
+    requests is off. Two comments per thread keep the exchange short."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        YOUTUBE_API_KEY="key",  # pyright: ignore[reportCallIssue]
+        arxiv_request_interval_s=0,
+        db_path=str(tmp_path / "techdebate.db"),
+        max_comments_per_thread=2,
+    )
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    return settings
 
 
-def _post_and_run(capsys: pytest.CaptureFixture[str], text: str = "httpx") -> tuple[list[str], str]:
-    """Creates the post and runs the agents: the visit lines, sorted since the agents act at the same time, and
-    stderr."""
-    cli.main(["post", text])
-    capsys.readouterr()
-    cli.main(["run"])
-    out, err = capsys.readouterr()
-    return sorted(out.splitlines()), err
+def _scientist_saves_after_the_developer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first two top-level comments could be saved in either order, and the later one notifies the author of the
+    earlier. The Scientist's comments wait until the Developer has saved one, so its comment is #2."""
+    create_comment = Forum.create_comment
+    developer_saved = asyncio.Event()
+
+    async def in_order(self: Forum, author: User, parent_id: str, text: str) -> Message:
+        if author.username == "scientist":
+            await asyncio.wait_for(developer_saved.wait(), timeout=5)
+        comment = await create_comment(self, author, parent_id, text)
+        if author.username == "developer":
+            developer_saved.set()
+        return comment
+
+    monkeypatch.setattr(Forum, "create_comment", in_order)
 
 
-def _show(capsys: pytest.CaptureFixture[str]) -> str:
-    cli.main(["show"])
-    return capsys.readouterr().out
+def _command(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[str, str]:
+    cli.main(list(argv))
+    return capsys.readouterr()
 
 
-def _calls_of(llm: FakeLLM, agent: str) -> list[LLMRequest]:
-    return [call for call in llm.calls if call.system.startswith(f"You are the {agent},")]
+def _requests(respx_mock: respx.MockRouter) -> Counter[str]:
+    """The requests made so far, by source."""
+    sources = {
+        "api.github.com": "github",
+        "pypi.org": "pypi",
+        "pypistats.org": "pypi",
+        "export.arxiv.org": "arxiv",
+        "www.googleapis.com": "youtube",
+    }
+    calls = cast("list[Call]", respx_mock.calls)
+    return Counter(sources[call.request.url.host] for call in calls)
 
 
-@pytest.mark.usefixtures("mock_github", "mock_pypi")
-def test_the_developer_comments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    llm = FakeLLM(
-        rules=[*_OTHERS_PASS, (_is_research, _RESEARCH), (_is_decide, _COMMENT_ON_POST), (_is_write, _COMMENT)]
-    )
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    lines, err = _post_and_run(capsys)
-
-    research, decide, write = _calls_of(llm, "Developer")
-    assert (research.prompt_id, decide.prompt_id, write.prompt_id) == ("research.v1", "decide.v1", "developer.v1")
-    assert len(llm.calls) == 5  # and the research calls of the Scientist and the Pollster
-    assert research.messages[0].content == f"{_OVERVIEW}\n\nNew to you: the post."
-    # The write call gets the overview and the tool report the decide call saw, and where it writes what.
-    report = decide.messages[0].content.removeprefix(f"{_OVERVIEW}\n\n{_DECIDE_BLOCK}\n\n")
-    assert write.messages[0].content == (
-        f"{_OVERVIEW}\n\n{report}\n\nYour comment: a top-level comment on the post.\nYour point: Downloads are heavy."
-    )
-    assert report.startswith('Tool results:\n\ngithub_search, query "httpx":\n')
-    for url in (
-        "https://github.com/search?q=httpx&type=repositories",  # github_search
-        "https://github.com/fastapi/fastapi/commits",  # github_repo
-        "https://pypi.org/project/httpx/",  # pypi
-    ):
-        assert url in report
-    for call in (research, decide, write):
-        assert "httpx" not in call.system
-        assert "You are the Developer" in call.system
-
-    assert lines == [
-        "Developer [AI] commented: #1",
-        "Pollster [AI] passed at research: Not a public topic.",
-        "Scientist [AI] passed at research: No research angle.",
-    ]
-    assert err == "visits=3 comments=1 cost=$0.000000\n"  # nothing else, so no tool failed and no role was left out
-    assert _show(capsys) == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {_COMMENT}\n"
+def _prompts(llm: FakeLLM, agent: str) -> list[str | None]:
+    """The prompt IDs of one agent's calls, in order."""
+    return [call.prompt_id for call in llm.calls if call.system.startswith(f"You are the {agent},")]
 
 
-def test_every_agent_passes_at_the_research_call(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], respx_mock: respx.MockRouter
-) -> None:
-    llm = FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _SKIP)])
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    lines, err = _post_and_run(capsys)
-
-    assert [request.prompt_id for request in llm.calls] == ["research.v1"] * 3
-    assert respx_mock.calls.call_count == 0
-    assert "Developer [AI] passed at research: Not my area." in lines
-    assert err == "visits=3 comments=0 cost=$0.000000\n"
-    assert _show(capsys) == "me:\nhttpx\n\n  No comments.\n"
+def _tool_report(request: LLMRequest) -> str:
+    """The tool report of a write call, without the discussion around it."""
+    return request.messages[-1].content.split("\n\nTool results:\n\n")[1].split("\n\nYour comment:")[0]
 
 
-@pytest.mark.usefixtures("mock_github", "mock_pypi")
-def test_the_developer_researches_and_then_passes(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], respx_mock: respx.MockRouter
-) -> None:
-    llm = FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _RESEARCH), (_is_decide, _NOTHING_NEW)])
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    lines, err = _post_and_run(capsys)
-
-    assert [request.prompt_id for request in _calls_of(llm, "Developer")] == ["research.v1", "decide.v1"]
-    assert respx_mock.calls.call_count > 0  # the searches ran
-    assert "Developer [AI] passed: The results only repeat the post." in lines
-    assert err == "visits=3 comments=0 cost=$0.000000\n"
-    assert _show(capsys) == "me:\nhttpx\n\n  No comments.\n"
+async def _notifications(settings: Settings) -> dict[str, list[Notification]]:
+    """Every notification of every user, closed or not, by username."""
+    async with open_store(settings) as store:
+        return {
+            user.username: await store.list_notifications(user.id, include_closed=True)
+            for user in await store.list_users()
+        }
 
 
-@pytest.mark.usefixtures("mock_github")
-def test_the_developer_leaves_out_a_tool_that_does_not_fit(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    llm = FakeLLM(
-        rules=[*_OTHERS_PASS, (_is_research, _NO_PYPI), (_is_decide, _COMMENT_ON_POST), (_is_write, _COMMENT)]
-    )
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    _, err = _post_and_run(capsys)  # a request to PyPI would have no mock, and fail the test
-
-    assert _calls_of(llm, "Developer")[1].messages[0].content.endswith("pypi: not used")
-    assert err == "visits=3 comments=1 cost=$0.000000\n"
-
-
-def test_a_comment_is_still_written_when_every_source_is_down(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], respx_mock: respx.MockRouter
-) -> None:
-    respx_mock.route().respond(500)
-    text = "It is widely used, though my searches failed."
-    llm = FakeLLM(rules=[*_OTHERS_PASS, (_is_research, _RESEARCH), (_is_decide, _COMMENT_ON_POST), (_is_write, text)])
-    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
-
-    lines, err = _post_and_run(capsys)
-
-    for call in _calls_of(llm, "Developer")[1:]:  # the decide and write calls
-        for tool in ("github_search", "github_repo", "pypi"):
-            assert f'{tool}, query "httpx": the tool failed' in call.messages[0].content
-    assert "Developer [AI] commented: #1" in lines
-    assert err.count("tool failed") == 3
-    assert _show(capsys) == f"me:\nhttpx\n\n  #1 Developer [AI]:\n  {text}\n"
+async def _researched(settings: Settings) -> dict[str, bool]:
+    """Whether each agent has saved research on the post."""
+    async with open_store(settings) as store:
+        [post] = await store.list_posts()
+        agents = [user for user in await store.list_users() if user.username != settings.username]
+        return {agent.username: await store.get_research(agent.id, post.id) is not None for agent in agents}
 
 
 @pytest.mark.usefixtures("mock_github", "mock_pypi", "mock_arxiv", "mock_youtube")
-def test_all_three_agents_research_with_their_own_tools_and_comment(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_a_whole_discussion(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    respx_mock: respx.MockRouter,
 ) -> None:
-    comments = {
-        "Developer": "Developers use it: [httpx on PyPI](https://pypi.org/project/httpx/).",
-        "Scientist": "Researchers write about it: [papers](https://arxiv.org/abs/2010.11929).",
-        "Pollster": "The public watches it: [videos](https://www.youtube.com/results?search_query=httpx).",
-    }
-    plans = {
-        "Scientist": ResearchPlan(speak=True, queries={"arxiv": ["vision transformer"]}, reason="Papers exist."),
-        "Pollster": ResearchPlan(speak=True, queries={"youtube": ["rust programming"]}, reason="Videos exist."),
-    }
-
-    def later_look(request: LLMRequest) -> bool:
-        """A decide call on the other agents' comments, which notify an agent that has commented on the post."""
-        return request.prompt_id == "decide.v1" and "New to you: the post" not in request.messages[0].content
-
-    llm = FakeLLM(
-        rules=[
-            (later_look, _NOTHING_NEW),
-            (_is_research, _RESEARCH),
-            *((_is(agent, "research.v1"), plan) for agent, plan in plans.items()),
-            *((_is(agent, "decide.v1"), _COMMENT_ON_POST) for agent in comments),
-            *((_is(agent, f"{agent.lower()}.v1"), text) for agent, text in comments.items()),
-        ]
-    )
+    llm = FakeLLM(rules=_SCRIPT)
     monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+    _scientist_saves_after_the_developer(monkeypatch)
 
-    lines, err = _post_and_run(capsys)
+    # I post, and the agents look: two research and comment, and one passes. The Scientist's #2 notifies the
+    # Developer, and the two answer each other until the Scientist's thread is full.
+    assert _command(capsys, "post", "httpx")[0] == ""
+    out, err = _command(capsys, "run")
 
-    # Each agent researches once and writes with its own prompt, and its write call holds only its own tools' results.
-    reports: dict[str, str] = {}
-    for agent in comments:
-        calls = _calls_of(llm, agent)
-        assert [call.prompt_id for call in calls].count("research.v1") == 1
-        [write] = [call for call in calls if call.prompt_id == f"{agent.lower()}.v1"]
-        reports[agent] = write.messages[0].content.split("Tool results:")[1]
-    assert "github.com" in reports["Developer"] and "arxiv.org" not in reports["Developer"]
-    assert "arxiv.org" in reports["Scientist"] and "github.com" not in reports["Scientist"]
-    assert "youtube.com" in reports["Pollster"] and "github.com" not in reports["Pollster"]
-    assert "youtube.com" not in reports["Developer"] + reports["Scientist"]
-    assert "arxiv.org" not in reports["Pollster"]
+    assert sorted(out.splitlines()) == [
+        "Developer [AI] commented: #1",
+        "Developer [AI] commented: #3",
+        "Developer [AI] commented: #5",
+        "Pollster [AI] passed at research: Not a public topic.",
+        "Scientist [AI] at its limit: thread #2 is full",
+        "Scientist [AI] commented: #2",
+        "Scientist [AI] commented: #4",
+    ]
+    assert err == "visits=7 comments=5 cost=$0.000000\n"  # nothing else, so no tool failed and no role was left out
+    first_run = _requests(respx_mock)
+    assert first_run["github"] > 0 and first_run["pypi"] > 0 and first_run["arxiv"] > 0
+    assert first_run["youtube"] == 0  # the Pollster passed before searching
 
-    # Each top-level comment notified the agents that had already commented, which then passed.
-    commented = [line for line in lines if " commented: " in line]
-    assert sorted(line.split(" [AI]")[0] for line in commented) == ["Developer", "Pollster", "Scientist"]
-    assert all(" passed: " in line for line in lines if line not in commented)
-    assert err.splitlines()[-1].endswith("comments=3 cost=$0.000000")
-    shown = _show(capsys)
-    for text in comments.values():
-        assert text in shown
+    # I reply in the Developer's thread and mention the Pollster, which takes its first look again and answers. The
+    # Developer is notified of both, and passes. Its notifications can come in one visit or two, so the lines are a set.
+    assert _command(capsys, "reply", "1", _TEXT[6]) == ("", "comment=#6\n")
+    out, err = _command(capsys, "run")
+
+    assert set(out.splitlines()) == {
+        "Pollster [AI] commented: #7",
+        "Developer [AI] passed: The question is for the Pollster.",
+    }
+    assert err.endswith(" comments=1 cost=$0.000000\n")
+    second_run = _requests(respx_mock)
+    assert {source: second_run[source] for source in ("github", "pypi", "arxiv")} == {
+        source: first_run[source] for source in ("github", "pypi", "arxiv")
+    }
+    assert second_run["youtube"] > 0
+
+    # The discussion as I read it, and my notifications: the top-level comments on my post, and the answer in the
+    # thread I replied in.
+    out, err = _command(capsys, "show")
+    assert out == (
+        "me:\n"
+        "httpx\n"
+        "\n"
+        "  #1 Developer [AI]:\n"
+        f"  {_TEXT[1]}\n"
+        "\n"
+        "    #6 me:\n"
+        f"    {_TEXT[6]}\n"
+        "\n"
+        "    #7 Pollster [AI], replying to #6:\n"
+        f"    {_TEXT[7]}\n"
+        "\n"
+        "  #2 Scientist [AI]:\n"
+        f"  {_TEXT[2]}\n"
+        "\n"
+        "    #3 Developer [AI]:\n"
+        f"    {_TEXT[3]}\n"
+        "\n"
+        "    #4 Scientist [AI], replying to #3:\n"
+        f"    {_TEXT[4]}\n"
+        "\n"
+        "    #5 Developer [AI], replying to #4:\n"
+        f"    {_TEXT[5]}\n"
+    )
+    assert err == "comments=7\n"
+    out, err = _command(capsys, "notifications")
+    assert out == (
+        f"#1 Developer [AI] commented on your post:\n{_TEXT[1]}\n\n"
+        f"#2 Scientist [AI] commented on your post:\n{_TEXT[2]}\n\n"
+        f"#7 Pollster [AI] replied to #6, in thread #1:\n{_TEXT[7]}\n"
+    )
+    assert err == "notifications=3\n"
+
+    # Nothing is left pending, and each notification is closed with what its visit did. The Scientist's full thread
+    # cost no AI call.
+    notifications = asyncio.run(_notifications(settings))
+    assert all(not n.pending for ns in notifications.values() for n in ns)
+    assert {name: [n.outcome for n in ns] for name, ns in notifications.items()} == {
+        "me": [NotificationOutcome.SEEN] * 3,
+        "developer": [NotificationOutcome.COMMENTED] * 3 + [NotificationOutcome.PASSED] * 2,  # the post, #2, #4; #6, #7
+        "scientist": [NotificationOutcome.COMMENTED] * 2 + [NotificationOutcome.LIMIT],  # the post, #3; #5
+        "pollster": [NotificationOutcome.PASSED, NotificationOutcome.COMMENTED],  # the post; #6
+    }
+
+    # Each agent researched the post once: its later visits went straight to the decide call with its saved research,
+    # and only the Pollster, which had passed at the research call, took its first look again.
+    developer = _prompts(llm, "Developer")
+    assert developer[:7] == ["research.v1"] + ["decide.v1", "developer.v1"] * 3
+    assert developer[7:] in (["decide.v1"], ["decide.v1"] * 2)
+    assert _prompts(llm, "Scientist") == ["research.v1"] + ["decide.v1", "scientist.v1"] * 2
+    assert _prompts(llm, "Pollster") == ["research.v1", "research.v1", "decide.v1", "pollster.v1"]
+    assert asyncio.run(_researched(settings)) == {"developer": True, "scientist": True, "pollster": True}
+
+    # Each agent wrote with its own tools' results only.
+    hosts = {"Developer": "github.com", "Scientist": "arxiv.org", "Pollster": "youtube.com"}
+    for agent in _AGENTS:
+        for write in (call for call in llm.calls if _call(agent, _WRITE_PROMPTS[agent])(call)):
+            report = _tool_report(write)
+            assert all((host in report) == (owner == agent) for owner, host in hosts.items()), (agent, report)
