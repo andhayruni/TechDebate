@@ -169,6 +169,9 @@ class GitHubRepoTool:
     async def _resolve(self, query: str) -> str:
         query = query.strip()
         if _FULL_NAME.match(query):
+            # `.` and `..` would be normalized away in the URL path, so `../..` would ask for the API root.
+            if any(part in (".", "..") for part in query.split("/")):
+                raise NotFoundError(f"github: invalid repository name {query}")
             return query
         params: dict[str, str | int] = {"q": query, "sort": "stars", "order": "desc", "per_page": 1}
         items: list[dict[str, Any]] = (await _get(self._client, "/search/repositories", self._headers, params)).json()[

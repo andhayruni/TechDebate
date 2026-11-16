@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import logging
+import os
+import signal
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,7 @@ from techdebate.models import (
 from techdebate.orchestrator import Visit
 from techdebate.prompts import load_prompt
 from techdebate.roles import ROLE_SPECS
+from techdebate.runner import agents_lock
 from techdebate.store import open_store
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 from techdebate.tree import Tree
@@ -896,3 +899,165 @@ def test_run_lines_name_the_post_of_each_visit(
         )
     )
     assert err == "visits=6 comments=2 cost=$0.000000\n"
+
+
+def test_run_goes_on_after_an_unexpected_error_and_prints_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    class _Buggy(FakeLLM):
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            if _is_write(request):
+                raise KeyError("id")
+            return await super().generate(request)
+
+    _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    monkeypatch.setattr(cli, "_make_llm", lambda: _Buggy(rules=[*_OTHERS_PASS, *_COMMENTS]))
+    capsys.readouterr()
+
+    cli.main(["run"])  # does not exit with a traceback of its own
+
+    out, err = capsys.readouterr()
+    short = _posts(tmp_path / "techdebate.db")[0].id[:8]
+    assert f"{short} Developer [AI] failed: unexpected error: KeyError('id')" in out.splitlines()
+    assert "visit failed unexpectedly" in err and "Traceback" in err  # logged with its traceback
+    assert err.splitlines()[-1] == "visits=3 comments=0 cost=$0.000000"
+
+
+# agents
+
+
+def _interrupt() -> None:
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def _interrupt_after(monkeypatch: pytest.MonkeyPatch, visits: int) -> None:
+    """Sends Ctrl-C once `visits` visits have been printed."""
+    printed: list[Visit] = []
+    print_visit = cli._print_visit  # pyright: ignore[reportPrivateUsage]
+
+    def counted(visit: Visit) -> None:
+        print_visit(visit)
+        printed.append(visit)
+        if len(printed) == visits:
+            _interrupt()
+
+    monkeypatch.setattr(cli, "_print_visit", counted)
+
+
+def test_agents_acts_on_what_is_pending_and_stops_cleanly_on_ctrl_c(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
+    _interrupt_after(monkeypatch, 3)
+    capsys.readouterr()
+
+    cli.main(["agents"])  # returns: a clean stop exits with 0
+
+    out, err = capsys.readouterr()
+    short = _posts(db_path)[0].id[:8]
+    assert sorted(out.splitlines()) == [
+        f"{short} Developer [AI] commented: #1",
+        f"{short} Pollster [AI] passed at research: Not my area.",
+        f"{short} Scientist [AI] passed at research: Not my area.",
+    ]
+    assert err.splitlines() == [
+        f"agents running on {db_path} (Ctrl-C to stop)",
+        "stopping (Ctrl-C again to stop now)",
+        "visits=3 comments=1 cost=$0.000000",
+    ]
+
+
+def test_the_first_ctrl_c_lets_the_visit_in_progress_finish(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    class _Interrupted(FakeLLM):
+        """Ctrl-C comes while the Developer writes."""
+
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            if _is_write(request):
+                _interrupt()
+                await asyncio.sleep(0.1)  # the signal is handled while the visit is in progress
+            return await super().generate(request)
+
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    monkeypatch.setattr(cli, "_make_llm", lambda: _Interrupted(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
+    capsys.readouterr()
+
+    cli.main(["agents"])
+
+    out, err = capsys.readouterr()
+    assert f"{_posts(db_path)[0].id[:8]} Developer [AI] commented: #1" in out.splitlines()
+    assert any(
+        line.startswith("stopping: waiting for ") and line.endswith(" in progress (Ctrl-C again to stop now)")
+        for line in err.splitlines()
+    )
+    assert err.splitlines()[-1].startswith("visits=")
+    assert _pending_agent_notifications(db_path) == []
+
+
+def test_a_second_ctrl_c_stops_at_once_and_leaves_the_visit_pending(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    class _Interrupted(FakeLLM):
+        """Ctrl-C twice while the Developer writes, a write that would take far too long."""
+
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            if _is_write(request):
+                _interrupt()
+                await asyncio.sleep(0.05)
+                _interrupt()
+                await asyncio.sleep(30)
+            return await super().generate(request)
+
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    monkeypatch.setattr(cli, "_make_llm", lambda: _Interrupted(rules=[*_OTHERS_PASS, *_COMMENTS, (_is_write, "Used.")]))
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agents"])
+
+    assert exc.value.code == 130
+    assert capsys.readouterr().err.splitlines()[-1] == "interrupted"
+    assert _pending_agent_notifications(db_path) == ["developer"]  # handled next time
+
+
+def _pending_agent_notifications(db_path: Path) -> list[str]:
+    """The usernames of the agents with a pending notification."""
+
+    async def read() -> list[str]:
+        async with open_store(_db_settings(db_path)) as store:
+            agents = await store.list_users(UserKind.AGENT)
+            return [agent.username for agent in agents if await store.list_notifications(agent.id)]
+
+    return asyncio.run(read())
+
+
+@pytest.mark.parametrize("command", ["run", "agents"])
+def test_the_agents_are_refused_while_another_process_runs_them(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, command: str
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    cli.main(["post", "Is Rust growing?"])
+    llm = FakeLLM()
+    monkeypatch.setattr(cli, "_make_llm", lambda: llm)
+    capsys.readouterr()
+
+    with agents_lock(_db_settings(db_path)):  # as another process would hold it
+        err = _fails(capsys, [command])
+        cli.main(["comment", "Still works."])  # the other commands do not take the lock
+
+    assert err == (
+        "error: the agents are already running on this database (techdebate agents, run or the web app): "
+        "stop it first\n"
+    )
+    assert llm.calls == []
+
+
+def test_agents_takes_no_argument() -> None:
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(["agents", "Rust"])  # pyright: ignore[reportPrivateUsage]

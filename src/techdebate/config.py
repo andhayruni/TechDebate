@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # How many comments an agent may write in one thread, its top-level comment included.
     max_comments_per_thread: int = Field(default=3, ge=1)
 
+    # How often, in seconds, a waiting agent checks the database while `techdebate agents` runs. The agents' own
+    # comments wake them at once; this picks up what another process wrote, such as a comment from the command line.
+    agent_poll_s: float = Field(default=5.0, gt=0)
+
     # The SDK retries rate limits, server and connection errors with backoff.
     llm_timeout_s: float = 60.0
     llm_max_retries: int = 1

@@ -473,6 +473,49 @@ async def test_a_failed_visit_is_closed_as_failed_and_the_other_agents_go_on(sto
     assert await store.get_research(world.agents["first"].id, post.id) is not None  # saved before the decide call
 
 
+class _Buggy(FakeLLM):
+    """The first agent's decide call hits a bug: an error that is neither LLMError nor BudgetExceeded."""
+
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        if _by("decide.v1", "first")(request):
+            raise KeyError("id")
+        return await super().generate(request)
+
+
+async def test_an_unexpected_error_is_logged_and_closed_as_failed_and_the_other_agents_go_on(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    world = await _world(store, "first", "second")
+    post = await world.post()
+    llm = _Buggy(rules=[_plans("first", _RESEARCH), *_comments("second")])
+
+    with caplog.at_level(logging.ERROR, logger="techdebate.orchestrator"):
+        visits = {v.agent.username: v for v in await world.loop(llm).run()}
+
+    assert (visits["first"].outcome, visits["first"].reason) == (
+        NotificationOutcome.FAILED,
+        "unexpected error: KeyError('id')",
+    )
+    assert visits["second"].outcome is NotificationOutcome.COMMENTED
+    assert _outcomes(await world.notifications("first")) == [NotificationOutcome.FAILED]
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert record.getMessage() == f"visit failed unexpectedly post_id={post.id} agent=first"
+    assert record.exc_info is not None  # the traceback is logged
+
+
+async def test_an_agent_acts_again_after_an_unexpected_error(store: Store) -> None:
+    world = await _world(store, "first")
+    post = await world.post()
+    await world.loop(_Buggy(rules=[_plans("first", _RESEARCH)])).run()
+    await world.reply(post, "@first any numbers?")
+    llm = FakeLLM(rules=[_decides("first", _PASS)])
+
+    [visit] = await world.loop(llm).run()
+
+    assert visit.outcome is NotificationOutcome.PASSED
+    assert _calls(llm, "first") == ["decide.v1"]  # the research saved before the bug is used
+
+
 async def test_a_visit_that_fails_after_a_comment_keeps_it(store: Store) -> None:
     world = await _world(store)
     post = await world.post()
