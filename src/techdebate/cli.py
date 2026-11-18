@@ -4,7 +4,7 @@
 database, as the user in `username`. A post is named by its short ID, the start of its ID, and the commands that work on
 one post take `--post`. `techdebate run` lets the agents act on their notifications until none is pending, and
 `techdebate agents` keeps them running until Ctrl-C. `techdebate budget` prints what the budgets have spent and what is
-left. `techdebate ask "<question>"` checks the LLM setup, and
+left. `techdebate web` serves the web app on this machine. `techdebate ask "<question>"` checks the LLM setup, and
 `techdebate evidence <tool> "<query>"` runs one evidence tool.
 """
 
@@ -15,14 +15,11 @@ import os
 import signal
 import sys
 import textwrap
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from techdebate.config import Settings, get_settings
 from techdebate.errors import CommandError, TechDebateError, usd_limit
-from techdebate.forum import Forum
 from techdebate.llm import (
     AnthropicLLM,
     BudgetScope,
@@ -38,12 +35,12 @@ from techdebate.logging_setup import setup_logging
 from techdebate.models import Evidence, Message, Notification, NotificationOutcome, NotificationReason, User
 from techdebate.orchestrator import AgentLoop, Visit
 from techdebate.prompts import load_prompt
-from techdebate.roles import RoleRegistry, default_roles
 from techdebate.runner import AgentRunner, agents_lock
-from techdebate.store import Store, open_store
+from techdebate.session import Session, open_session
+from techdebate.store import Store
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
 from techdebate.tree import Tree
-from techdebate.users import shown_name, sync_users
+from techdebate.users import shown_name
 from techdebate.views import cut
 
 log = logging.getLogger(__name__)
@@ -86,34 +83,6 @@ async def _evidence_command(tool_name: str, query: str) -> list[Evidence]:
 # The discussion in the database
 
 
-@dataclass(frozen=True)
-class _Session:
-    store: Store
-    me: User  # the real user in `username`, who writes from the command line
-    agents: dict[str, User]  # by role name, in registry order
-    forum: Forum
-    roles: RoleRegistry
-    tools: ToolRegistry
-
-
-@asynccontextmanager
-async def _session(settings: Settings) -> AsyncGenerator[_Session]:
-    """The store, with the users synced to the role registry, the forum that notifies its agents, and the tools. The
-    HTTP client stays open for the whole command, so `run` can use the tools; the other commands make no request."""
-    async with open_store(settings) as store, make_http_client(settings) as client:
-        tools = default_tools(settings, client)
-        roles = default_roles(tools)
-        users = await sync_users(store, roles, settings.username)
-        yield _Session(
-            store=store,
-            me=users.me,
-            agents=users.agents,
-            forum=Forum(store, users.agents.values()),
-            roles=roles,
-            tools=tools,
-        )
-
-
 def short_id(post_id: str) -> str:
     """How a post is named in what the commands print."""
     return post_id[:_SHORT_ID_CHARS]
@@ -144,13 +113,13 @@ async def _tree(store: Store, post: Message) -> Tree:
 
 
 async def _post_command(settings: Settings, text: str) -> Message:
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         return await session.forum.create_post(session.me, text)
 
 
 async def _posts_command(settings: Settings) -> list[str]:
     """One line per post, newest first: its short ID, its number of comments and the start of its text."""
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         lines: list[str] = []
         for post in await session.store.list_posts():
             count = len((await _tree(session.store, post)).comments)
@@ -164,7 +133,7 @@ async def _comment_command(
     settings: Settings, text: str, reply_to: int | None = None, post_ref: str | None = None
 ) -> tuple[Message, int]:
     """The post, and the number of the new comment on it: a top-level one, or a reply to comment #reply_to."""
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         post = await _find_post(session.store, post_ref)
         tree = await _tree(session.store, post)
         parent = tree.post if reply_to is None else tree.comment(reply_to)
@@ -176,7 +145,7 @@ async def _comment_command(
 
 async def _show_command(settings: Settings, post_ref: str | None = None) -> tuple[Message, str, int]:
     """The post, the printed discussion, and its number of comments."""
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         post = await _find_post(session.store, post_ref)
         tree = await _tree(session.store, post)
         users = {user.id: user for user in await session.store.list_users()}
@@ -193,7 +162,7 @@ class _BudgetReport:
 async def _budget_command(settings: Settings, post_ref: str | None = None) -> _BudgetReport:
     """Today's spending for all agents and for each agent, then one post's: the newest, or the one `post_ref` names.
     With no post yet the post line is left out."""
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         store = session.store
         now = datetime.now(UTC)
         scopes = {scope.name: scope for scope in budget_scopes(settings)}
@@ -230,7 +199,7 @@ def _duration(left: timedelta) -> str:
     return f"{minutes // 60}h {minutes % 60}m"
 
 
-def _agent_loop(session: _Session, settings: Settings) -> AgentLoop:
+def _agent_loop(session: Session, settings: Settings) -> AgentLoop:
     return AgentLoop(
         session.store,
         session.forum,
@@ -248,7 +217,7 @@ def _print_visit(visit: Visit) -> None:
 
 async def _run_command(settings: Settings) -> list[Visit]:
     """Lets the agents act until no notification is pending, printing one line per visit as it ends."""
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         with agents_lock(settings):
             return await _agent_loop(session, settings).run(on_visit=_print_visit)
 
@@ -264,7 +233,7 @@ _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 async def _agents_command(settings: Settings) -> tuple[list[Visit], bool]:
     """Keeps the agents running, printing one line per visit as it ends, until Ctrl-C or SIGTERM. Returns the visits,
     and whether a second signal cut the visits in progress short."""
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         with agents_lock(settings):
             runner = AgentRunner(_agent_loop(session, settings), poll_s=settings.agent_poll_s, on_visit=_print_visit)
             session.forum.subscribe(runner.wake)
@@ -294,6 +263,37 @@ async def _agents_command(settings: Settings) -> tuple[list[Visit], bool]:
                 for sig in _STOP_SIGNALS:
                     loop.remove_signal_handler(sig)
             return runner.visits, forced
+
+
+_DEFAULT_PORT = 8000
+# Handed to uvicorn by its import path when it reloads, since it then builds the app in a process of its own.
+_APP_FACTORY = "techdebate.web:create_app"
+
+
+def _web_command(settings: Settings, *, port: int, reload: bool) -> None:
+    """Serves the web app on 127.0.0.1 until Ctrl-C."""
+    # Imported here, so the other commands do not load the web stack.
+    import uvicorn
+
+    from techdebate.web import HOST, create_app
+
+    # Opened once before serving, so a bad username or database fails in one line, as in every command, and not in a
+    # traceback from the app's startup.
+    asyncio.run(_check_session(settings))
+    print(f"web app on http://{HOST}:{port}, database {_full_path(settings.db_path)} (Ctrl-C to stop)", file=sys.stderr)
+    try:
+        if reload:
+            uvicorn.run(_APP_FACTORY, factory=True, host=HOST, port=port, reload=True)
+        else:
+            uvicorn.run(create_app(settings), host=HOST, port=port)
+    except KeyboardInterrupt:
+        # uvicorn shuts down on Ctrl-C and then raises it again. It is the normal way to end `web`, as with `agents`.
+        pass
+
+
+async def _check_session(settings: Settings) -> None:
+    async with open_session(settings):
+        pass
 
 
 def _visit_line(visit: Visit) -> str:
@@ -338,7 +338,7 @@ def _comment_header(tree: Tree, comment: Message, users: dict[str, User]) -> str
 async def _notifications_command(settings: Settings, *, include_closed: bool, post_ref: str | None = None) -> int:
     """Prints my notifications on every post, or on one with `post_ref`, oldest first, then closes the pending ones it
     printed as seen. Returns how many it printed."""
-    async with _session(settings) as session:
+    async with open_session(settings) as session:
         store = session.store
         notifications = await store.list_notifications(session.me.id, include_closed=include_closed)
         if post_ref is not None:
@@ -421,6 +421,9 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[common, on_post],
         help="Print what the agents have spent today and on a post, and what is left",
     )
+    web = sub.add_parser("web", parents=[common], help="Serve the web app on this machine (127.0.0.1) until Ctrl-C")
+    web.add_argument("--port", type=int, default=_DEFAULT_PORT, help="The port to listen on (default: %(default)s)")
+    web.add_argument("--reload", action="store_true", help="Restart when the code changes, for development")
     notifications = sub.add_parser(
         "notifications", parents=[common], help="List my pending notifications and mark them as seen"
     )
@@ -473,6 +476,8 @@ def _run(args: argparse.Namespace) -> None:
         print(report.text)
         post = "" if report.post is None else f" post={short_id(report.post.id)}"
         print(f"spent_today=${report.spent_today:.6f}{post}", file=sys.stderr)
+    if args.command == "web":
+        _web_command(get_settings(), port=args.port, reload=args.reload)
     if args.command == "notifications":
         count = asyncio.run(_notifications_command(get_settings(), include_closed=args.all, post_ref=args.post))
         print(f"notifications={count}", file=sys.stderr)
