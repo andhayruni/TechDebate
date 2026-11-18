@@ -14,6 +14,7 @@ from alembic.script import ScriptDirectory
 from pydantic import TypeAdapter
 from sqlalchemy import Connection, event, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import aliased
 
 from techdebate.config import Settings
 from techdebate.errors import StoreError
@@ -27,7 +28,7 @@ from techdebate.models import (
     User,
     UserKind,
 )
-from techdebate.store.base import PostWithComments, Store, StoreOps
+from techdebate.store.base import PostSummary, PostWithComments, Store, StoreOps
 from techdebate.store.tables import LLMCallRow, MessageRow, NotificationRow, ResearchRow, UserRow
 
 log = logging.getLogger(__name__)
@@ -116,6 +117,22 @@ class _SessionOps:
     async def list_posts(self) -> list[Message]:
         query = select(MessageRow).where(MessageRow.post_id.is_(None)).order_by(MessageRow.seq.desc())
         return [_message(row) for row in await self._session.scalars(query)]
+
+    async def list_post_summaries(self) -> list[PostSummary]:
+        comment = aliased(MessageRow)
+        counts = (
+            select(comment.post_id, func.count().label("comments"))
+            .where(comment.post_id.is_not(None))
+            .group_by(comment.post_id)
+            .subquery()
+        )
+        query = (
+            select(MessageRow, func.coalesce(counts.c.comments, 0))
+            .outerjoin(counts, counts.c.post_id == MessageRow.id)
+            .where(MessageRow.post_id.is_(None))
+            .order_by(MessageRow.seq.desc())
+        )
+        return [PostSummary(post=_message(row), comments=count) for row, count in await self._session.execute(query)]
 
     async def add_notifications(self, notifications: Sequence[Notification]) -> None:
         self._session.add_all([NotificationRow(**notification.model_dump()) for notification in notifications])
@@ -213,6 +230,10 @@ class SqliteStore:
     async def list_posts(self) -> list[Message]:
         async with self._read() as ops:
             return await ops.list_posts()
+
+    async def list_post_summaries(self) -> list[PostSummary]:
+        async with self._read() as ops:
+            return await ops.list_post_summaries()
 
     async def add_notifications(self, notifications: Sequence[Notification]) -> None:
         async with self.transaction() as tx:

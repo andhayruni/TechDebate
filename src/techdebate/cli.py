@@ -121,11 +121,11 @@ async def _posts_command(settings: Settings) -> list[str]:
     """One line per post, newest first: its short ID, its number of comments and the start of its text."""
     async with open_session(settings) as session:
         lines: list[str] = []
-        for post in await session.store.list_posts():
-            count = len((await _tree(session.store, post)).comments)
+        for summary in await session.store.list_post_summaries():
+            count = summary.comments
             comments = f"{count} comment{'' if count == 1 else 's'}"
-            start = cut(post.text.splitlines()[0], _POST_START_CHARS)
-            lines.append(f"{short_id(post.id)}  {comments}  {start}")
+            start = cut(summary.post.text.splitlines()[0], _POST_START_CHARS)
+            lines.append(f"{short_id(summary.post.id)}  {comments}  {start}")
         return lines
 
 

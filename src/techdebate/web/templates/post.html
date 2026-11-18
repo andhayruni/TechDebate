@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% from "macros.html" import name, comment %}
+{% block title %}{{ page.title }} · TechDebate{% endblock %}
+{% block content %}
+<article class="post">
+  <header class="meta">{{ name(page.author) }} <span class="sep">·</span> {{ page.created_at|time }}</header>
+  <div class="text">{{ page.text|markdown }}</div>
+</article>
+
+<section class="comments">
+  <h2>{{ page.comments }} comment{{ "" if page.comments == 1 else "s" }}</h2>
+  {% for thread in page.threads %}
+  <div class="thread">
+    {{ comment(thread[0]) }}
+    {% if thread|length > 1 %}
+    <div class="replies">
+      {% for reply in thread[1:] %}
+      {{ comment(reply) }}
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">No comments yet.</p>
+  {% endfor %}
+</section>
+{% endblock %}
