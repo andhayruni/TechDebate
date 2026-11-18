@@ -23,7 +23,9 @@ from techdebate.models import (
     Research,
     ToolResult,
     User,
+    UserKind,
 )
+from techdebate.notify import find_mentions
 from techdebate.places import POST, Places, one_per_thread, place_message, places_for
 from techdebate.roles import RoleRegistry, RoleSpec
 from techdebate.store import Store
@@ -205,6 +207,7 @@ class AgentLoop:
         post_id = tree.post.id
         messages = {message.id: message for message in (tree.post, *tree.comments)}
         about = [messages[notification.message_id] for notification in notifications]
+        users = {user.id: user for user in await self._store.list_users()}
         news = News(
             new=tuple(sorted({_place(tree, message) for message in about})),
             asked_in=tuple(
@@ -216,8 +219,8 @@ class AgentLoop:
                     }
                 )
             ),
+            asked_others=self._asked_others(tree, agent, about, users),
         )
-        users = {user.id: user for user in await self._store.list_users()}
         overview = overview_for(tree, users, reply_chars=self._settings.overview_reply_chars, in_full=about)
 
         results: list[ToolResult]
@@ -253,6 +256,21 @@ class AgentLoop:
             text = await analyst.write(view, item.place, results, item.point)
             acted.written.append(await self._forum.create_comment(agent, parent.id, text))
             acted.outcome = NotificationOutcome.COMMENTED
+
+    def _asked_others(
+        self, tree: Tree, agent: User, about: Sequence[Message], users: Mapping[str, User]
+    ) -> dict[int, tuple[str, ...]]:
+        """The new comments in which a real user mentions other agents in the registry, with their display names in
+        the order they are mentioned. A post that mentions an agent is still open to every agent, so it is left out."""
+        others = {role.name: role.display_name for role in self._roles.roles() if role.name != agent.username}
+        asked: dict[int, tuple[str, ...]] = {}
+        for message in about:
+            if message.id == tree.post.id or users[message.author_id].kind is not UserKind.REAL:
+                continue
+            names = tuple(others[name] for name in find_mentions(message.text) if name in others)
+            if names:
+                asked[tree.number(message)] = names
+        return asked
 
     async def has_pending(self, role: RoleSpec) -> bool:
         """Whether the agent has a notification to act on."""

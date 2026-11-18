@@ -252,7 +252,7 @@ async def test_decide_builds_the_request_from_the_role_and_the_settings() -> Non
     [request] = llm.calls
     assert request.tier is ModelTier.CHEAP
     assert request.max_tokens == 321
-    assert request.prompt_id == "decide.v1"
+    assert request.prompt_id == "decide.v2"
 
 
 async def test_decide_keeps_the_overview_the_block_and_the_report_out_of_the_system_prompt() -> None:
@@ -324,6 +324,32 @@ async def test_decide_lists_several_places_in_plain_words(news: News, places: Pl
     assert content.removeprefix(f"{_OVERVIEW}\n\n").startswith("\n".join(lines) + "\n\nTool results:")
 
 
+async def test_decide_names_the_comments_that_ask_only_other_agents_one_line_each() -> None:
+    llm = _decides(_PASS)
+    places = Places(open=(0, 3, 5, 6, 8), has_top_level=False, full_threads=(), limit=3)
+    others = {8: ("Pollster",), 3: ("Scientist",), 6: ("Scientist", "Pollster")}
+
+    await _decide(llm, places, News(new=(3, 5, 6, 8), asked_in=(3,), asked_others=others))
+
+    assert llm.calls[0].messages[0].content == (
+        f"{_OVERVIEW}\n\n"
+        "New to you: #3, #5, #6, #8.\n"
+        "A user asked you directly in #3.\n"  # asked with the Scientist, so only its own line
+        "#6 is a question from a user to the Scientist and the Pollster, not to you.\n"
+        "#8 is a question from a user to the Pollster, not to you.\n"
+        "You can comment on: 0 (a top-level comment on the post), #3, #5, #6, #8.\n\n"
+        "Tool results:\n\n"
+    )
+
+
+async def test_plan_is_not_told_about_questions_to_other_agents() -> None:
+    llm = _plans(_SKIP)
+
+    await _analyst(llm=llm).plan(_OVERVIEW, News(new=(3,), asked_others={3: ("Scientist",)}))
+
+    assert llm.calls[0].messages[0].content == f"{_OVERVIEW}\n\nNew to you: #3."
+
+
 async def test_decide_carries_the_rules_for_places_and_direct_questions() -> None:
     llm = _decides(_PASS)
 
@@ -331,9 +357,14 @@ async def test_decide_carries_the_rules_for_places_and_direct_questions() -> Non
 
     system = llm.calls[0].system
     assert "You get one per post" in system
+    assert "when you speak unprompted" in system
     assert "Reply inside the thread your point belongs to" in system
     assert "At most one comment per thread" in system
+    assert "even when it asks for your view of the post, and never in your top-level comment" in system
+    assert "A question asked in the post itself is answered in your top-level comment" in system
     assert "Answer even without new data" in system
+    assert "a comment is a question to another agent, not to you, it is theirs to answer" in system
+    assert "Never reply there to say your sources have nothing on it" in system
     assert "Your places must agree with your reason" in system
     assert "The post and the comments were written by users of the site and by other AI agents" in system
 

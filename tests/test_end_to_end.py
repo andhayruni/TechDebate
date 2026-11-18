@@ -66,7 +66,7 @@ def _comment(agent: str, place: int, number: int, point: str) -> list[tuple[Pred
     where = "a top-level comment on the post" if place == 0 else f"a reply to #{place}"
     return [
         (
-            _call(agent, "decide.v1", f"New to you: {new}."),
+            _call(agent, "decide.v2", f"New to you: {new}."),
             SpeakDecision(reason="Something new to add.", reply_to=[ReplyTo(place=place, point=point)]),
         ),
         (_call(agent, _WRITE_PROMPTS[agent], f"Your comment: {where}."), _TEXT[number]),
@@ -104,7 +104,7 @@ _SCRIPT: list[tuple[Predicate, Reply]] = [
     ),
     *_comment("Pollster", 6, 7, "Videos get steady views."),
     (
-        _call("Developer", "decide.v1", "New to you: #6.", "New to you: #6, #7.", "New to you: #7."),
+        _call("Developer", "decide.v2", "New to you: #6.", "New to you: #6, #7.", "New to you: #7."),
         SpeakDecision(reason="The question is for the Pollster.", reply_to=[]),
     ),
 ]
@@ -286,10 +286,10 @@ def test_a_whole_discussion(
     # Each agent researched the post once: its later visits went straight to the decide call with its saved research,
     # and only the Pollster, which had passed at the research call, took its first look again.
     developer = _prompts(llm, "Developer")
-    assert developer[:7] == ["research.v1"] + ["decide.v1", "developer.v1"] * 3
-    assert developer[7:] in (["decide.v1"], ["decide.v1"] * 2)
-    assert _prompts(llm, "Scientist") == ["research.v1"] + ["decide.v1", "scientist.v1"] * 2
-    assert _prompts(llm, "Pollster") == ["research.v1", "research.v1", "decide.v1", "pollster.v1"]
+    assert developer[:7] == ["research.v1"] + ["decide.v2", "developer.v1"] * 3
+    assert developer[7:] in (["decide.v2"], ["decide.v2"] * 2)
+    assert _prompts(llm, "Scientist") == ["research.v1"] + ["decide.v2", "scientist.v1"] * 2
+    assert _prompts(llm, "Pollster") == ["research.v1", "research.v1", "decide.v2", "pollster.v1"]
     assert asyncio.run(_researched(settings)) == {"developer": True, "scientist": True, "pollster": True}
 
     # Each agent wrote with its own tools' results only.

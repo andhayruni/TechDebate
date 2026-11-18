@@ -285,7 +285,7 @@ def _is_research(request: LLMRequest) -> bool:
 
 
 def _is_decide(request: LLMRequest) -> bool:
-    return request.prompt_id == "decide.v1"
+    return request.prompt_id == "decide.v2"
 
 
 # The research and decide calls of an agent that comments on the post.

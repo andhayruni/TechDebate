@@ -19,6 +19,7 @@ from techdebate.models import (
     Notification,
     NotificationOutcome,
     ReplyTo,
+    Research,
     ResearchPlan,
     SpeakDecision,
     User,
@@ -34,7 +35,7 @@ _RESEARCH = ResearchPlan(speak=True, queries={"stub": ["rust lang"]}, reason="In
 _SKIP = ResearchPlan(speak=False, queries={"stub": []}, reason="Not my area.")
 _COMMENT = SpeakDecision(reason="The data is new.", reply_to=[ReplyTo(place=0, point="Downloads doubled.")])
 _PASS = SpeakDecision(reason="Nothing new.", reply_to=[])
-_PRICES = {"research.v1": 0.01, "decide.v1": 0.02, "developer.v1": 0.25}
+_PRICES = {"research.v1": 0.01, "decide.v2": 0.02, "developer.v1": 0.25}
 
 
 class _StubInput(ToolInput):
@@ -85,7 +86,7 @@ def _plans(name: str, plan: ResearchPlan) -> tuple[Predicate, Reply]:
 
 
 def _decides(name: str, decision: SpeakDecision) -> tuple[Predicate, Reply]:
-    return _by("decide.v1", name), decision
+    return _by("decide.v2", name), decision
 
 
 def _writes(name: str, text: str = "Developers use it.") -> tuple[Predicate, Reply]:
@@ -179,7 +180,7 @@ async def test_an_agent_researches_decides_and_comments_on_the_post(store: Store
     # Every call is stored, for the agent and the post.
     calls = await store.list_llm_calls(post.id)
     assert [(c.agent_id, c.prompt_id) for c in calls] == [
-        (world.agents["developer"].id, prompt_id) for prompt_id in ("research.v1", "decide.v1", "developer.v1")
+        (world.agents["developer"].id, prompt_id) for prompt_id in ("research.v1", "decide.v2", "developer.v1")
     ]
     research_call, decide_call, write_call = llm.calls
     overview = "Post by me:\nRust\n\n  No comments yet."
@@ -229,7 +230,7 @@ async def test_research_is_done_once_and_reused_on_a_later_visit(store: Store) -
 
     [visit] = await world.loop(llm).run()
 
-    assert _calls(llm, "developer") == ["decide.v1", "developer.v1"]  # no research call
+    assert _calls(llm, "developer") == ["decide.v2", "developer.v1"]  # no research call
     assert world.tool.queries == ["rust lang"]  # searched once, on the first visit
     assert "https://example.com/x" in llm.calls[0].messages[0].content  # the saved report
     assert (visit.outcome, visit.comments) == (NotificationOutcome.COMMENTED, (3,))
@@ -250,6 +251,62 @@ async def test_a_direct_question_is_new_to_the_agent_and_shown_in_full(store: St
     content = llm.calls[0].messages[0].content
     assert "New to you: #2.\nA user asked you directly in #2." in content
     assert question.strip() in content  # not cut, though it is a long reply
+
+
+async def _each_commented(world: _World, post: Message) -> None:
+    """Every agent has researched the post and has a top-level comment on it, and nothing is pending."""
+    for name, agent in world.agents.items():
+        await world.store.add_research(Research(agent_id=agent.id, post_id=post.id, results=[]))
+        await world.forum.create_comment(agent, post.id, f"{name.title()} view.")
+    for agent in world.agents.values():
+        pending = await world.store.list_notifications(agent.id)
+        await world.store.close_notifications([n.id for n in pending], NotificationOutcome.PASSED)
+
+
+def _decide_call(llm: FakeLLM, name: str) -> str:
+    [content] = [r.messages[0].content for r in llm.calls if _by("decide.v2", name)(r)]
+    return content
+
+
+async def test_the_decide_call_names_the_other_agents_a_user_asked_in_a_comment(store: Store) -> None:
+    world = await _world(store, "developer", "scientist", "pollster")
+    post = await world.post()
+    await _each_commented(world, post)
+    await world.reply(post, "@Scientist and @pollster, is there any data on this?")
+    llm = FakeLLM(rules=[(lambda r: r.prompt_id == "decide.v2", _PASS)])
+
+    await world.loop(llm).run()
+
+    assert (
+        "New to you: #4.\n#4 is a question from a user to the Scientist and the Pollster, not to you.\nYou can"
+        in _decide_call(llm, "developer")
+    )
+    for asked in ("scientist", "pollster"):
+        assert "New to you: #4.\nA user asked you directly in #4.\nYou can" in _decide_call(llm, asked)
+
+
+async def test_a_post_that_names_an_agent_is_still_open_to_the_others(store: Store) -> None:
+    world = await _world(store, "developer", "scientist")
+    await world.post("@scientist is there research on Rust?")
+    llm = FakeLLM(rules=[(lambda r: r.prompt_id == "research.v1", _RESEARCH), (lambda _: True, _PASS)])
+
+    await world.loop(llm).run()
+
+    assert "asked the" not in _decide_call(llm, "developer")
+    assert "A user asked you directly in the post." in _decide_call(llm, "scientist")
+
+
+async def test_an_agent_naming_another_agent_asks_no_one(store: Store) -> None:
+    world = await _world(store, "developer", "scientist", "pollster")
+    post = await world.post()
+    await _each_commented(world, post)
+    await world.forum.create_comment(world.agents["scientist"], post.id, "@pollster, what do the videos say?")
+    llm = FakeLLM(rules=[(lambda r: r.prompt_id == "decide.v2", _PASS)])
+
+    await world.loop(llm).run()
+
+    assert "New to you: #4.\nYou can" in _decide_call(llm, "developer")
+    assert "asked" not in _decide_call(llm, "pollster")
 
 
 async def test_every_notification_on_a_post_is_handled_in_one_visit_oldest_post_first(store: Store) -> None:
@@ -295,7 +352,7 @@ async def test_research_is_kept_apart_per_post(store: Store) -> None:
     await world.reply(rust, "@developer and the crates?")
     llm = FakeLLM(rules=[_decides("developer", _PASS)])
     await world.loop(llm).run()
-    assert _calls(llm, "developer") == ["decide.v1"]
+    assert _calls(llm, "developer") == ["decide.v2"]
     assert "rust lang" in llm.calls[0].messages[0].content
     assert "go lang" not in llm.calls[0].messages[0].content
     assert tool.queries == ["rust lang", "go lang"]
@@ -379,7 +436,7 @@ async def test_two_agents_act_at_the_same_time(store: Store) -> None:
             return await super().generate(request)
 
     def later_look(request: LLMRequest) -> bool:  # on the other agent's comment, which notifies the one before it
-        return request.prompt_id == "decide.v1" and "New to you: the post" not in request.messages[0].content
+        return request.prompt_id == "decide.v2" and "New to you: the post" not in request.messages[0].content
 
     llm = _Meeting(
         rules=[(later_look, _PASS), *_comments("first", "First view."), *_comments("second", "Second view.")]
@@ -417,7 +474,7 @@ async def test_comments_written_after_an_agent_stopped_start_another_round(
             return await super().generate(request)
 
     def second_look(request: LLMRequest) -> bool:
-        return _by("decide.v1", "first")(request) and "New to you: #2." in request.messages[0].content
+        return _by("decide.v2", "first")(request) and "New to you: #2." in request.messages[0].content
 
     llm = _Late(rules=[(second_look, _PASS), *_comments("first"), *_comments("second")])
 
@@ -479,7 +536,7 @@ class _Buggy(FakeLLM):
     """The first agent's decide call hits a bug: an error that is neither LLMError nor BudgetExceeded."""
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
-        if _by("decide.v1", "first")(request):
+        if _by("decide.v2", "first")(request):
             raise KeyError("id")
         return await super().generate(request)
 
@@ -515,7 +572,7 @@ async def test_an_agent_acts_again_after_an_unexpected_error(store: Store) -> No
     [visit] = await world.loop(llm).run()
 
     assert visit.outcome is NotificationOutcome.PASSED
-    assert _calls(llm, "first") == ["decide.v1"]  # the research saved before the bug is used
+    assert _calls(llm, "first") == ["decide.v2"]  # the research saved before the bug is used
 
 
 async def test_a_visit_that_fails_after_a_comment_keeps_it(store: Store) -> None:
@@ -575,7 +632,7 @@ async def test_the_agent_stops_when_the_post_budget_is_used_up(store: Store) -> 
     assert (visit.outcome, visit.comments) == (NotificationOutcome.BUDGET, ())
     assert visit.reason == "the post has spent $0.0300 of its $0.02 budget"
     assert visit.cost_usd == pytest.approx(0.03)
-    assert _calls(llm, "developer") == ["research.v1", "decide.v1"]
+    assert _calls(llm, "developer") == ["research.v1", "decide.v2"]
     assert _outcomes(await world.notifications("developer")) == [NotificationOutcome.BUDGET]
     assert await store.get_research(world.agents["developer"].id, post.id) is not None
     assert (await world.tree(post)).comments == ()
@@ -617,7 +674,7 @@ async def test_a_visit_stopped_by_the_budget_keeps_the_comments_it_wrote(store: 
     [visit] = await world.loop(llm, post_budget_usd=0.27).run()
 
     assert (visit.outcome, visit.comments) == (NotificationOutcome.BUDGET, (2,))
-    assert _calls(llm, "developer") == ["research.v1", "decide.v1", "developer.v1"]
+    assert _calls(llm, "developer") == ["research.v1", "decide.v2", "developer.v1"]
     assert [c.text for c in (await world.tree(post)).comments] == ["My view.", "Developers use it."]
 
 
@@ -662,7 +719,7 @@ async def test_an_agent_out_of_its_budget_for_today_stops_while_the_others_go_on
         ("second", NotificationOutcome.COMMENTED, "The data is new."),
     }
     assert _calls(llm, "first") == []
-    assert _calls(llm, "second") == ["research.v1", "decide.v1", "developer.v1"]
+    assert _calls(llm, "second") == ["research.v1", "decide.v2", "developer.v1"]
     assert [c.author_id for c in (await world.tree(post)).comments] == [world.agents["second"].id]
     assert _outcomes(await world.notifications("first")) == [NotificationOutcome.PASSED, NotificationOutcome.BUDGET]
 

@@ -70,8 +70,8 @@ def _comments(name: str, text: str = "Developers use it.") -> list[tuple[Predica
     """An agent that researches and comments on a post the first time, and passes after that."""
     return [
         (_by("research.v1", name), _RESEARCH),
-        (lambda r: _by("decide.v1", name)(r) and "New to you: the post." in r.messages[0].content, _COMMENT),
-        (_by("decide.v1", name), _PASS),
+        (lambda r: _by("decide.v2", name)(r) and "New to you: the post." in r.messages[0].content, _COMMENT),
+        (_by("decide.v2", name), _PASS),
         (_by("developer.v1", name), text),
     ]
 
