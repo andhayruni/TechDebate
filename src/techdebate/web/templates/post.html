@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import name, comment, write_box %}
+{% from "macros.html" import name, thread, write_box %}
 {% block title %}{{ page.title }} · TechDebate{% endblock %}
 {% block content %}
 <article class="post">
@@ -9,21 +9,16 @@
 
 {{ write_box("/posts/" ~ page.id ~ "/comments", "Add a comment", "Comment", me) }}
 
-<section class="comments">
-  <h2>{{ page.comments }} comment{{ "" if page.comments == 1 else "s" }}</h2>
-  {% for thread in page.threads %}
-  <div class="thread">
-    {{ comment(thread[0], page.id, me) }}
-    {% if thread|length > 1 %}
-    <div class="replies">
-      {% for reply in thread[1:] %}
-      {{ comment(reply, page.id, me) }}
-      {% endfor %}
-    </div>
-    {% endif %}
+<section class="comments" id="comments" data-events="/posts/{{ page.id }}/events?after={{ page.comments }}">
+  <h2 id="comment-count">{{ page.comments }} comment{{ "" if page.comments == 1 else "s" }}</h2>
+  {%- if not page.threads %}
+  <p class="muted" id="no-comments">No comments yet.</p>
+  {%- endif %}
+  <div id="threads">
+    {%- for comments in page.threads %}
+    {{ thread(comments, page.id, me) }}
+    {%- endfor %}
   </div>
-  {% else %}
-  <p class="muted">No comments yet.</p>
-  {% endfor %}
 </section>
+<script src="/static/live.js" defer></script>
 {% endblock %}

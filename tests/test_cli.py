@@ -47,6 +47,7 @@ from techdebate.spending import duration
 from techdebate.store import open_store
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 from techdebate.tree import Tree
+from techdebate.web.events import EventBus
 from techdebate.web.server import WebServer
 
 
@@ -1386,6 +1387,7 @@ class _Runner:
 def _web_server(runner: _Runner | None) -> WebServer:
     app = FastAPI()
     app.state.runner = runner
+    app.state.events = EventBus()
     return WebServer(uvicorn.Config(app), app)
 
 
@@ -1399,6 +1401,7 @@ def test_the_web_servers_first_signal_lets_the_visits_finish(capsys: pytest.Capt
     assert not server.force_exit
     assert not server.forced
     assert not runner.cancelled
+    assert server._app.state.events.closed  # the live streams of open pages end  # pyright: ignore[reportPrivateUsage]
     assert capsys.readouterr().err == "stopping: waiting for 2 visits in progress (Ctrl-C again to stop now)\n"
 
 

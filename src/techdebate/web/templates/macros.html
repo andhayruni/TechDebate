@@ -35,3 +35,12 @@
   </details>
 </article>
 {%- endmacro %}
+
+{# A thread: its top-level comment and its replies, oldest first. The replies container is always there, empty with no
+   whitespace when there are none, so a reply that arrives live has a place to go. #}
+{% macro thread(comments, post_id, me) -%}
+<div class="thread" id="t{{ comments[0].number }}">
+  {{ comment(comments[0], post_id, me) }}
+  <div class="replies" id="r{{ comments[0].number }}">{% for reply in comments[1:] %}{{ comment(reply, post_id, me) }}{% endfor %}</div>
+</div>
+{%- endmacro %}

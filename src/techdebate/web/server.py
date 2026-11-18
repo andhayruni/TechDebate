@@ -16,6 +16,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from techdebate.runner import AgentRunner, stopping_message
+from techdebate.web.events import EventBus
 
 _SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
@@ -30,6 +31,10 @@ class WebServer(uvicorn.Server):
         runner: AgentRunner | None = self._app.state.runner
         if not self.should_exit:
             self.should_exit = True
+            # uvicorn waits for open connections to close before it shuts the app down, so the live streams of open
+            # pages end now.
+            events: EventBus = self._app.state.events
+            events.close()
             if runner is not None:
                 print(stopping_message(runner.in_progress), file=sys.stderr, flush=True)
             return

@@ -25,6 +25,7 @@ from techdebate.llm import AnthropicLLM, LLMClient
 from techdebate.orchestrator import AgentLoop, Visit
 from techdebate.runner import AgentRunner, agents_lock
 from techdebate.session import open_session
+from techdebate.web.events import EventBus
 from techdebate.web.origin import same_origin
 from techdebate.web.routes import router
 from techdebate.web.templating import templates
@@ -61,6 +62,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[dict[str, Any]]:
         async with open_session(settings) as session, AsyncExitStack() as stack:
+            session.forum.subscribe(app.state.events)
+            stack.callback(app.state.events.close)
             if agents:
                 stack.enter_context(agents_lock(settings))
                 loop = AgentLoop(
@@ -96,6 +99,7 @@ def create_app(
     app.state.settings = settings
     app.state.agents = agents
     app.state.runner = None  # the agent runner while the app runs, with `agents`
+    app.state.events = EventBus()  # wakes the live streams of a post when a message is saved on it
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     app.mount("/static", StaticFiles(packages=[("techdebate.web", "static")]), name="static")
     app.add_exception_handler(TechDebateError, _techdebate_error)
