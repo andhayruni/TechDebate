@@ -101,6 +101,12 @@ class AgentRunner:
                 pass
 
 
+def stopping_message(in_progress: int) -> str:
+    """What a command that keeps the agents running says on its first Ctrl-C."""
+    waiting = f": waiting for {in_progress} visit{'' if in_progress == 1 else 's'} in progress" if in_progress else ""
+    return f"stopping{waiting} (Ctrl-C again to stop now)"
+
+
 def lock_path(settings: Settings) -> str:
     return f"{settings.db_path}.agents.lock"
 

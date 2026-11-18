@@ -1,6 +1,7 @@
 import asyncio
 import re
-from collections.abc import AsyncGenerator, Iterator
+import time
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,7 +16,12 @@ from jinja2 import UndefinedError
 
 from techdebate.config import Settings
 from techdebate.errors import CommandError, ForumError
-from techdebate.models import Message
+from techdebate.llm import FakeLLM, LLMRequest
+from techdebate.llm.fake import Predicate, Reply
+from techdebate.models import LLMCall, Message, ReplyTo, ResearchPlan, SpeakDecision
+from techdebate.orchestrator import Visit
+from techdebate.roles import ROLE_SPECS
+from techdebate.runner import agents_lock
 from techdebate.session import Session, open_session
 from techdebate.store import open_store
 from techdebate.web import app as web_app
@@ -34,7 +40,7 @@ def settings(db_path: Path) -> Settings:
 
 @pytest.fixture
 def app(settings: Settings) -> FastAPI:
-    return create_app(settings)
+    return create_app(settings, agents=False)
 
 
 @pytest.fixture
@@ -93,7 +99,7 @@ def test_the_session_is_opened_at_startup_and_closed_at_shutdown(
         events.append("closed")
 
     monkeypatch.setattr(web_app, "open_session", recording)
-    app = create_app(settings)
+    app = create_app(settings, agents=False)
 
     @app.get("/me")
     async def me(session: Session = Depends(get_session)) -> str:  # pyright: ignore[reportUnusedFunction]  # noqa: B008
@@ -116,7 +122,7 @@ async def test_startup_creates_the_database_and_syncs_the_users(client: TestClie
 
 
 def test_pages_get_the_settings_the_app_was_built_with(settings: Settings) -> None:
-    app = create_app(settings)
+    app = create_app(settings, agents=False)
 
     @app.get("/db")
     async def db(app_settings: Settings = Depends(get_app_settings)) -> str:  # pyright: ignore[reportUnusedFunction]  # noqa: B008
@@ -209,7 +215,7 @@ def test_an_invalid_value_is_a_422_page(app: FastAPI) -> None:
 
 
 def _app_with_a_bug(settings: Settings) -> FastAPI:
-    app = create_app(settings)
+    app = create_app(settings, agents=False)
 
     @app.get("/bug")
     async def bug() -> None:  # pyright: ignore[reportUnusedFunction]
@@ -305,7 +311,7 @@ def test_the_feed_lists_the_posts_newest_first_with_their_counts(settings: Setti
     older, newer = asyncio.run(_write(settings, ["The older post.", "The newer post."]))
     discussion = asyncio.run(_write_discussion(settings))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, "/")
 
     links = re.findall(r'<a class="feed-item" href="/posts/([^"]+)">', html)
@@ -317,7 +323,7 @@ def test_a_feed_item_shows_the_start_as_plain_text(settings: Settings) -> None:
     long_text = "**Bold** start with [a link](https://example.com/hidden). " + "word " * 100
     asyncio.run(_write(settings, [long_text]))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, "/")
 
     [start] = re.findall(r'<span class="start">([^<]*)</span>', html)
@@ -330,7 +336,7 @@ def test_a_feed_item_shows_the_start_as_plain_text(settings: Settings) -> None:
 def test_a_feed_item_shows_its_author_and_time(settings: Settings) -> None:
     asyncio.run(_write(settings, ["A post."]))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, "/")
 
     assert '<span class="author">me</span> <span class="sep">' in html
@@ -340,7 +346,7 @@ def test_a_feed_item_shows_its_author_and_time(settings: Settings) -> None:
 def test_the_post_page_shows_the_post_and_its_threads_oldest_first(settings: Settings) -> None:
     d = asyncio.run(_write_discussion(settings))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, f"/posts/{d.post.id}")
 
     assert "<title>Is Rust growing? See the survey. · TechDebate</title>" in html
@@ -361,7 +367,7 @@ def test_the_post_page_shows_the_post_and_its_threads_oldest_first(settings: Set
 def test_a_reply_to_a_reply_links_to_the_comment_it_answers(settings: Settings) -> None:
     d = asyncio.run(_write_discussion(settings))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, f"/posts/{d.post.id}")
 
     assert html.count('class="reply-to"') == 1
@@ -373,7 +379,7 @@ def test_a_reply_to_a_reply_links_to_the_comment_it_answers(settings: Settings) 
 def test_the_text_of_a_comment_is_markdown_without_raw_html(settings: Settings) -> None:
     d = asyncio.run(_write_discussion(settings))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, f"/posts/{d.post.id}")
 
     assert '<a href="https://github.com/rust-lang/rust" target="_blank" rel="nofollow noopener noreferrer">' in html
@@ -384,7 +390,7 @@ def test_the_text_of_a_comment_is_markdown_without_raw_html(settings: Settings) 
 def test_every_agent_carries_the_ai_badge_and_a_real_user_does_not(settings: Settings) -> None:
     d = asyncio.run(_write_discussion(settings))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         pages = [_page(client, "/"), _page(client, f"/posts/{d.post.id}")]
 
     badge = ' <span class="ai" title="AI agent">AI</span>'
@@ -400,7 +406,7 @@ def test_every_agent_carries_the_ai_badge_and_a_real_user_does_not(settings: Set
 def test_a_post_with_no_comments(settings: Settings) -> None:
     [post] = asyncio.run(_write(settings, ["A quiet post."]))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, f"/posts/{post.id}")
 
     assert "<h2>0 comments</h2>" in html
@@ -410,7 +416,7 @@ def test_a_post_with_no_comments(settings: Settings) -> None:
 def test_an_unknown_post_is_the_404_page(settings: Settings) -> None:
     d = asyncio.run(_write_discussion(settings))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         # A prefix of the ID, a comment's ID and an ID that names nothing.
         for post_id in (d.post.id[:8], d.top.id, "nope"):
             response = client.get(f"/posts/{post_id}")
@@ -592,7 +598,7 @@ def test_reading_needs_no_origin(client: TestClient) -> None:
 def test_the_feed_has_the_box_for_a_post_naming_the_user(db_path: Path) -> None:
     settings = Settings(_env_file=None, db_path=str(db_path), username="andok")  # pyright: ignore[reportCallIssue]
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, "/")
 
     assert '<form class="write" method="post" action="/posts">' in html
@@ -604,7 +610,7 @@ def test_the_feed_has_the_box_for_a_post_naming_the_user(db_path: Path) -> None:
 def test_the_post_page_has_a_box_for_a_comment_and_one_for_a_reply_under_each(settings: Settings) -> None:
     d = asyncio.run(_write_discussion(settings))
 
-    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, f"/posts/{d.post.id}")
 
     action = f'action="/posts/{d.post.id}/comments"'
@@ -617,3 +623,197 @@ def test_the_post_page_has_a_box_for_a_comment_and_one_for_a_reply_under_each(se
     top_box = html[html.index("</article>") : html.index('<section class="comments">')]
     assert action in top_box
     assert "reply_to" not in top_box
+
+
+# The agents in the app
+
+
+def _developer_answers() -> FakeLLM:
+    """The Developer researches with no queries, so no tool makes a request, and comments on the post. Every other
+    agent passes at research."""
+
+    def research_by(display_name: str) -> Predicate:
+        def matches(request: LLMRequest) -> bool:
+            return request.prompt_id == "research.v1" and request.system.startswith(f"You are the {display_name},")
+
+        return matches
+
+    def prompt(prompt_id: str) -> Predicate:
+        def matches(request: LLMRequest) -> bool:
+            return request.prompt_id == prompt_id
+
+        return matches
+
+    rules: list[tuple[Predicate, Reply]] = [
+        (
+            research_by(role.display_name),
+            ResearchPlan(
+                speak=role.name == "developer", queries={name: [] for name in role.tool_names}, reason="Checked."
+            ),
+        )
+        for role in ROLE_SPECS
+    ]
+    rules += [
+        (prompt("decide.v1"), SpeakDecision(reason="New data.", reply_to=[ReplyTo(place=0, point="It is used.")])),
+        (prompt("developer.v1"), "Rust is used, by the numbers."),
+    ]
+    return FakeLLM(rules=rules)
+
+
+def _wait_for(check: Callable[[], bool], timeout_s: float = 10) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not check():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.05)
+
+
+def test_a_post_written_in_the_browser_is_answered_by_the_agents_in_the_app(settings: Settings) -> None:
+    visits: list[Visit] = []
+    app = create_app(settings, llm=_developer_answers(), on_visit=visits.append)
+
+    with TestClient(app, base_url=BASE_URL) as client:
+        location = _write_from_page(client, "/posts", {"text": "Is Rust growing?"}).headers["location"]
+        _wait_for(lambda: "Rust is used, by the numbers." in client.get(location).text)
+        html = client.get(location).text
+
+    assert '<span class="author">Developer</span> <span class="ai" title="AI agent">AI</span>' in html
+    assert "<h2>1 comment</h2>" in html
+    assert any(visit.agent.username == "developer" and visit.comments == (1,) for visit in visits)
+
+
+def test_the_app_holds_the_agents_lock_while_it_runs_and_releases_it(settings: Settings) -> None:
+    app = create_app(settings, llm=_developer_answers())
+
+    with TestClient(app, base_url=BASE_URL):
+        assert app.state.runner is not None
+        with pytest.raises(CommandError, match="already running"), agents_lock(settings):
+            pass
+
+    assert app.state.runner is None
+    with agents_lock(settings):  # released on shutdown
+        pass
+
+
+def test_the_app_does_not_start_while_another_process_runs_the_agents(settings: Settings) -> None:
+    with agents_lock(settings), pytest.raises(CommandError, match="already running"):
+        with TestClient(create_app(settings, llm=_developer_answers()), base_url=BASE_URL):
+            pass
+
+
+def test_without_agents_the_app_takes_no_lock(settings: Settings) -> None:
+    app = create_app(settings, agents=False)
+
+    with agents_lock(settings), TestClient(app, base_url=BASE_URL) as client:
+        assert client.get("/").status_code == 200
+        assert app.state.runner is None
+
+
+# The budgets on the pages
+
+
+async def _spend(settings: Settings, post: Message, *costs: tuple[str, float]) -> None:
+    """Stores an AI call per (agent, cost) on the post, made now."""
+    async with open_store(settings) as store:
+        for username, cost in costs:
+            agent = await store.find_user(username)
+            assert agent is not None
+            await store.add_llm_call(
+                LLMCall(
+                    agent_id=agent.id,
+                    post_id=post.id,
+                    prompt_id="decide.v1",
+                    model="claude-haiku-5-5",
+                    input_tokens=1,
+                    output_tokens=1,
+                    cost_usd=cost,
+                    duration_s=0.1,
+                )
+            )
+
+
+def _budget_settings(db_path: Path, **limits: float) -> Settings:
+    return Settings(_env_file=None, db_path=str(db_path), **limits)  # pyright: ignore[reportCallIssue]
+
+
+def _pages(settings: Settings, post: Message) -> list[str]:
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
+        return [_page(client, path) for path in ("/", f"/posts/{post.id}", "/budget")]
+
+
+def _text(html: str) -> str:
+    """What a reader sees of some HTML: its text, with the tags taken out and the spaces collapsed."""
+    return " ".join(re.sub(r"<[^>]+>", " ", html).split())
+
+
+def _notices_in(html: str) -> list[str]:
+    return [_text(notice) for notice in re.findall(r'<div class="notice"[^>]*>(.*?)</div>', html, re.S)]
+
+
+def test_no_notice_while_no_budget_is_used_up(settings: Settings) -> None:
+    [post] = asyncio.run(_write(settings, ["A post."]))
+    asyncio.run(_spend(settings, post, ("developer", 0.01)))
+
+    for html in _pages(settings, post):
+        assert _notices_in(html) == []
+
+
+def test_the_day_used_up_shows_on_every_page(db_path: Path) -> None:
+    settings = _budget_settings(db_path, daily_budget_usd=0.05)
+    [post] = asyncio.run(_write(settings, ["A post."]))
+    asyncio.run(_spend(settings, post, ("developer", 0.03), ("scientist", 0.03)))
+
+    for html in _pages(settings, post):
+        [notice] = _notices_in(html)
+        assert notice.startswith(
+            "The agents are out of budget for today ($0.05). They'll answer again after the reset in "
+        )
+        assert notice.endswith("Reading and writing still work. Budget")
+
+
+def test_an_agent_used_up_shows_on_every_page_with_its_badge(db_path: Path) -> None:
+    settings = _budget_settings(db_path, agent_budget_usd=0.02)
+    [post] = asyncio.run(_write(settings, ["A post."]))
+    asyncio.run(_spend(settings, post, ("developer", 0.03), ("scientist", 0.01)))
+
+    for html in _pages(settings, post):
+        [notice] = _notices_in(html)
+        assert notice.startswith(
+            "Developer AI is out of its budget for today ($0.02). It'll answer again after the reset in "
+        )
+        assert '<span class="ai" title="AI agent">AI</span> is out of its budget' in html
+
+
+def test_a_post_used_up_shows_on_its_page_only(db_path: Path) -> None:
+    settings = _budget_settings(db_path, post_budget_usd=0.02)
+    spent, other = asyncio.run(_write(settings, ["Spent post.", "Other post."]))
+    asyncio.run(_spend(settings, spent, ("developer", 0.03)))
+
+    feed_page, post_page, budget_page = _pages(settings, spent)
+    with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
+        other_page = _page(client, f"/posts/{other.id}")
+
+    assert _notices_in(post_page) == [
+        "The agents are out of budget for this post ($0.02) and won't comment on it again. Budget"
+    ]
+    for html in (feed_page, budget_page, other_page):
+        assert _notices_in(html) == []
+
+
+def test_the_budget_page_shows_today_and_every_post(db_path: Path) -> None:
+    settings = _budget_settings(db_path, post_budget_usd=0.02)
+    older, _ = asyncio.run(_write(settings, ["The older post.", "The newer post."]))
+    asyncio.run(_spend(settings, older, ("developer", 0.03), ("scientist", 0.0012)))
+
+    html = _pages(settings, older)[2]
+
+    rows = [_text(row) for row in re.findall(r"<tr>(.*?)</tr>", html, re.S)]
+    assert rows == [
+        "All agents $0.0312 of $5.00 $4.9688 left",
+        "Developer AI $0.0300 of $2.00 $1.9700 left",
+        "Scientist AI $0.0012 of $2.00 $1.9988 left",
+        "The newer post. $0.0000 of $0.02 $0.0200 left",
+        "The older post. $0.0312 of $0.02 used up",
+    ]
+    assert re.search(r"\(UTC, resets in \d+h \d+m\)", html)
+    assert f'<a href="/posts/{older.id}">The older post.</a>' in html
+    assert '<nav><a href="/budget">Budget</a></nav>' in html

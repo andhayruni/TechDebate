@@ -16,32 +16,35 @@ import signal
 import sys
 import textwrap
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from techdebate.config import Settings, get_settings
 from techdebate.errors import CommandError, TechDebateError, usd_limit
 from techdebate.llm import (
     AnthropicLLM,
-    BudgetScope,
     LLMClient,
     LLMRequest,
     LLMResponse,
     ModelTier,
-    budget_scopes,
-    end_of_day,
 )
 from techdebate.llm import Message as LLMMessage
 from techdebate.logging_setup import setup_logging
 from techdebate.models import Evidence, Message, Notification, NotificationOutcome, NotificationReason, User
 from techdebate.orchestrator import AgentLoop, Visit
 from techdebate.prompts import load_prompt
-from techdebate.runner import AgentRunner, agents_lock
+from techdebate.runner import AgentRunner, agents_lock, stopping_message
 from techdebate.session import Session, open_session
+from techdebate.spending import Spent, duration, spent_on_post, spent_today
 from techdebate.store import Store
 from techdebate.tools import ToolRegistry, default_tools, format_evidence, make_http_client
 from techdebate.tree import Tree
 from techdebate.users import shown_name
 from techdebate.views import cut
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+    from techdebate.web.server import WebServer
 
 log = logging.getLogger(__name__)
 
@@ -164,39 +167,29 @@ async def _budget_command(settings: Settings, post_ref: str | None = None) -> _B
     With no post yet the post line is left out."""
     async with open_session(settings) as session:
         store = session.store
-        now = datetime.now(UTC)
-        scopes = {scope.name: scope for scope in budget_scopes(settings)}
-        day, per_agent, per_post = scopes["day"], scopes["agent"], scopes["post"]
-
-        spent_today = await day.spent_usd(store, now=now)
-        today = [("all agents", spent_today, day)]
-        for agent in session.agents.values():
-            today.append((shown_name(agent), await per_agent.spent_usd(store, agent_id=agent.id, now=now), per_agent))
+        today = await spent_today(store, session.agents.values(), settings)
+        rows = [("all agents", today.all_agents)]
+        rows += [(shown_name(agent), spent) for agent, spent in today.agents]
         post = None
         if post_ref is not None or await store.list_posts():  # an unknown --post fails even with no post yet
             post = await _find_post(store, post_ref)
 
-        labelled = [(f"  {label}", spent, scope) for label, spent, scope in today]
+        labelled = [(f"  {label}", spent) for label, spent in rows]
         if post is not None:
-            labelled.append((f"Post {short_id(post.id)}:", await per_post.spent_usd(store, post_id=post.id), per_post))
-        label_width = max(len(label) for label, _, _ in labelled)
-        amounts = [f"${spent:.4f} of {usd_limit(scope.limit_usd)}" for _, spent, scope in labelled]
+            labelled.append((f"Post {short_id(post.id)}:", await spent_on_post(store, post.id, settings)))
+        label_width = max(len(label) for label, _ in labelled)
+        amounts = [f"${spent.spent_usd:.4f} of {usd_limit(spent.limit_usd)}" for _, spent in labelled]
         amount_width = max(len(amount) for amount in amounts)
-        rows = [
-            f"{label:<{label_width}}  {amount:<{amount_width}}   {_left(spent, scope)}"
-            for (label, spent, scope), amount in zip(labelled, amounts, strict=True)
+        lines = [
+            f"{label:<{label_width}}  {amount:<{amount_width}}   {_left(spent)}"
+            for (label, spent), amount in zip(labelled, amounts, strict=True)
         ]
-        lines = [f"Today (UTC, resets in {_duration(end_of_day(now) - now)}):", *rows]
-        return _BudgetReport(text="\n".join(lines), spent_today=spent_today, post=post)
+        text = "\n".join([f"Today (UTC, resets in {duration(today.resets_in)}):", *lines])
+        return _BudgetReport(text=text, spent_today=today.all_agents.spent_usd, post=post)
 
 
-def _left(spent: float, scope: BudgetScope) -> str:
-    return "used up" if scope.used_up(spent) else f"${scope.limit_usd - spent:.4f} left"
-
-
-def _duration(left: timedelta) -> str:
-    minutes = int(left.total_seconds()) // 60
-    return f"{minutes // 60}h {minutes % 60}m"
+def _left(spent: Spent) -> str:
+    return "used up" if spent.used_up else f"${spent.left_usd:.4f} left"
 
 
 def _agent_loop(session: Session, settings: Settings) -> AgentLoop:
@@ -243,9 +236,7 @@ async def _agents_command(settings: Settings) -> tuple[list[Visit], bool]:
             def on_signal() -> None:
                 nonlocal forced
                 if not stop.is_set():
-                    busy = runner.in_progress
-                    waiting = f": waiting for {busy} visit{'' if busy == 1 else 's'} in progress" if busy else ""
-                    print(f"stopping{waiting} (Ctrl-C again to stop now)", file=sys.stderr, flush=True)
+                    print(stopping_message(runner.in_progress), file=sys.stderr, flush=True)
                     stop.set()
                 else:
                     forced = True
@@ -266,34 +257,71 @@ async def _agents_command(settings: Settings) -> tuple[list[Visit], bool]:
 
 
 _DEFAULT_PORT = 8000
-# Handed to uvicorn by its import path when it reloads, since it then builds the app in a process of its own.
-_APP_FACTORY = "techdebate.web:create_app"
+# Handed to uvicorn by their import paths when it reloads, since it then builds the app in a process of its own.
+_APP_FACTORY = "techdebate.cli:web_app"
+_PAGES_FACTORY = "techdebate.cli:web_pages_app"
 
 
-def _web_command(settings: Settings, *, port: int, reload: bool) -> None:
-    """Serves the web app on 127.0.0.1 until Ctrl-C."""
+def web_app() -> "FastAPI":
+    """The web app with the agents, printing a line per visit, as `web --reload` builds it."""
+    from techdebate.web import create_app
+
+    return create_app(get_settings(), llm=_make_llm(), on_visit=_print_visit)
+
+
+def web_pages_app() -> "FastAPI":
+    """The web app without the agents, as `web --reload --no-agents` builds it."""
+    from techdebate.web import create_app
+
+    return create_app(get_settings(), agents=False)
+
+
+def _web_command(settings: Settings, *, port: int, reload: bool, agents: bool) -> bool:
+    """Serves the web app on 127.0.0.1 until Ctrl-C, with the agents unless `agents` is off. Returns whether a second
+    Ctrl-C cut the visits in progress short."""
     # Imported here, so the other commands do not load the web stack.
     import uvicorn
 
     from techdebate.web import HOST, create_app
+    from techdebate.web.server import WebServer
 
-    # Opened once before serving, so a bad username or database fails in one line, as in every command, and not in a
-    # traceback from the app's startup.
-    asyncio.run(_check_session(settings))
-    print(f"web app on http://{HOST}:{port}, database {_full_path(settings.db_path)} (Ctrl-C to stop)", file=sys.stderr)
-    try:
-        if reload:
-            uvicorn.run(_APP_FACTORY, factory=True, host=HOST, port=port, reload=True)
-        else:
-            uvicorn.run(create_app(settings), host=HOST, port=port)
-    except KeyboardInterrupt:
-        # uvicorn shuts down on Ctrl-C and then raises it again. It is the normal way to end `web`, as with `agents`.
-        pass
+    # Checked once before serving, so a bad username or database, or the agents running elsewhere, fail in one line,
+    # as in every command, and not in a traceback from the app's startup.
+    asyncio.run(_check_web(settings, agents=agents))
+    which = "with the agents" if agents else "without the agents"
+    print(
+        f"web app on http://{HOST}:{port} {which}, database {_full_path(settings.db_path)} (Ctrl-C to stop)",
+        file=sys.stderr,
+        flush=True,
+    )
+    if reload:
+        try:
+            uvicorn.run(_APP_FACTORY if agents else _PAGES_FACTORY, factory=True, host=HOST, port=port, reload=True)
+        except KeyboardInterrupt:
+            pass  # uvicorn's reloader stops on Ctrl-C and raises it again; it is the normal way to end `web`
+        return False
+    if agents:
+        app = create_app(settings, llm=_make_llm(), on_visit=_print_visit)
+    else:
+        app = create_app(settings, agents=False)
+    server = WebServer(uvicorn.Config(app, host=HOST, port=port), app)
+    _serve(server)
+    return server.forced
 
 
-async def _check_session(settings: Settings) -> None:
+def _serve(server: "WebServer") -> None:
+    server.run()
+
+
+async def _check_web(settings: Settings, *, agents: bool) -> None:
     async with open_session(settings):
         pass
+    if agents:
+        try:
+            with agents_lock(settings):
+                pass
+        except CommandError as e:
+            raise CommandError(f"{e}, or start the web app with --no-agents") from None
 
 
 def _visit_line(visit: Visit) -> str:
@@ -421,9 +449,14 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[common, on_post],
         help="Print what the agents have spent today and on a post, and what is left",
     )
-    web = sub.add_parser("web", parents=[common], help="Serve the web app on this machine (127.0.0.1) until Ctrl-C")
+    web = sub.add_parser(
+        "web", parents=[common], help="Serve the web app on this machine (127.0.0.1), with the agents, until Ctrl-C"
+    )
     web.add_argument("--port", type=int, default=_DEFAULT_PORT, help="The port to listen on (default: %(default)s)")
     web.add_argument("--reload", action="store_true", help="Restart when the code changes, for development")
+    web.add_argument(
+        "--no-agents", action="store_true", help="Serve the pages without running the agents (they can run elsewhere)"
+    )
     notifications = sub.add_parser(
         "notifications", parents=[common], help="List my pending notifications and mark them as seen"
     )
@@ -477,7 +510,8 @@ def _run(args: argparse.Namespace) -> None:
         post = "" if report.post is None else f" post={short_id(report.post.id)}"
         print(f"spent_today=${report.spent_today:.6f}{post}", file=sys.stderr)
     if args.command == "web":
-        _web_command(get_settings(), port=args.port, reload=args.reload)
+        if _web_command(get_settings(), port=args.port, reload=args.reload, agents=not args.no_agents):
+            raise KeyboardInterrupt
     if args.command == "notifications":
         count = asyncio.run(_notifications_command(get_settings(), include_closed=args.all, post_ref=args.post))
         print(f"notifications={count}", file=sys.stderr)
