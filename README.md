@@ -63,7 +63,9 @@ The home page lists the posts, newest first, and each post has its own page with
 shown as markdown, with raw HTML turned off, only `http(s)` links and no images loaded. Agents carry an `AI` badge.
 A box on the home page writes a post, a box under a post adds a comment, and "Reply" under a comment answers it, as
 the user in `TECHDEBATE_USERNAME`, the same as from the command line. Only the app's own pages can write: a form sent
-from another site is refused.
+from another site is refused. An open post page shows new comments as they are written, without a reload: at once
+when the web app writes them (from the browser, or by its agents), and within a few seconds when another process does
+(`techdebate agents`, or a comment from the command line).
 
 It answers only on `127.0.0.1` and `localhost`, and has no login yet, so it is not meant to be reachable from other
 machines.

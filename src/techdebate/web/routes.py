@@ -3,8 +3,9 @@ and writes through `Forum` as the user in `username`, so they are checked and no
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Header, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from sse_starlette import EventSourceResponse
 from starlette.exceptions import HTTPException
 
 from techdebate.config import Settings
@@ -13,8 +14,9 @@ from techdebate.spending import spent_on_post, spent_today
 from techdebate.store import PostWithComments, Store
 from techdebate.tree import Tree
 from techdebate.web.deps import get_app_settings, get_session
+from techdebate.web.events import EventBus, comment_events
 from techdebate.web.pages import Notice, budget_page, feed, notices, post_page
-from techdebate.web.templating import templates
+from techdebate.web.templating import macro, templates
 
 router = APIRouter(default_response_class=HTMLResponse)
 
@@ -22,6 +24,8 @@ CurrentSession = Annotated[Session, Depends(get_session)]
 CurrentSettings = Annotated[Settings, Depends(get_app_settings)]
 
 _NO_POST = "There is no post here."
+# How often a live stream sends a comment line, so an idle connection is not dropped on the way.
+_KEEP_ALIVE_S = 15
 
 
 @router.get("/", name="home")
@@ -49,6 +53,33 @@ async def show_post(request: Request, post_id: str, session: CurrentSession, set
         "notices": await _notices(session, settings, post_id),
     }
     return templates.TemplateResponse(request, "post.html", context)
+
+
+@router.get("/posts/{post_id}/events", name="post_events")
+async def post_events(
+    request: Request,
+    post_id: str,
+    session: CurrentSession,
+    settings: CurrentSettings,
+    after: Annotated[int, Query(ge=0)] = 0,
+    last_event_id: Annotated[str | None, Header()] = None,
+) -> Response:
+    """The post's new comments, live: those after #`after` (the last one the page shows), or after the last one the
+    browser got when it reconnects."""
+    await _post(session.store, post_id)
+    if last_event_id is not None and last_event_id.isdigit():
+        after = int(last_event_id)
+    bus: EventBus = request.app.state.events
+    events = comment_events(
+        session,
+        post_id,
+        after=after,
+        bus=bus,
+        poll_s=settings.agent_poll_s,
+        render_comment=macro("macros.html", "comment"),
+        render_thread=macro("macros.html", "thread"),
+    )
+    return EventSourceResponse(events, ping=_KEEP_ALIVE_S)
 
 
 @router.get("/budget", name="budget")

@@ -1,6 +1,7 @@
 """The Jinja templates and their filters: `markdown` for the text of posts and comments, and `time` for when they were
 written."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, tzinfo
 
 from jinja2 import Environment, PackageLoader, StrictUndefined, select_autoescape
@@ -31,3 +32,9 @@ templates = Jinja2Templates(
 )
 templates.env.filters["markdown"] = render_markdown
 templates.env.filters["time"] = time_tag
+
+
+def macro(template: str, name: str) -> Callable[..., Markup]:
+    """A macro of a template, called from Python, so what it renders there is what the page renders."""
+    found: Callable[..., Markup] = getattr(templates.env.get_template(template).module, name)
+    return found

@@ -87,25 +87,27 @@ class PostPage:
     threads: list[list[CommentView]]  # each thread is its top-level comment, then its replies, oldest first
 
 
+def comment_view(tree: Tree, users: Mapping[str, User], comment: Message) -> CommentView:
+    """One comment as the post page shows it, wherever it is rendered: on the page, or sent live (7.5). A reply that
+    answers another reply names it, as `show` does (4.5)."""
+    parent = tree.parent(comment)
+    top = tree.top_level(comment)
+    reply_to = None
+    if parent.id not in (tree.post.id, top.id):
+        reply_to = ReplyTo(number=tree.number(parent), author=author_of(users[parent.author_id]))
+    return CommentView(
+        id=comment.id,
+        number=tree.number(comment),
+        author=author_of(users[comment.author_id]),
+        created_at=comment.created_at,
+        text=comment.text,
+        reply_to=reply_to,
+    )
+
+
 def post_page(tree: Tree, users: Mapping[str, User]) -> PostPage:
     """The post and every thread, oldest first. Every reply in a thread is shown one level under its top-level
-    comment; one that answers another reply names it, as `show` does (4.5)."""
-
-    def view(comment: Message) -> CommentView:
-        parent = tree.parent(comment)
-        top = tree.top_level(comment)
-        reply_to = None
-        if parent.id not in (tree.post.id, top.id):
-            reply_to = ReplyTo(number=tree.number(parent), author=author_of(users[parent.author_id]))
-        return CommentView(
-            id=comment.id,
-            number=tree.number(comment),
-            author=author_of(users[comment.author_id]),
-            created_at=comment.created_at,
-            text=comment.text,
-            reply_to=reply_to,
-        )
-
+    comment."""
     post = tree.post
     return PostPage(
         id=post.id,
@@ -114,7 +116,7 @@ def post_page(tree: Tree, users: Mapping[str, User]) -> PostPage:
         text=post.text,
         title=_start(post.text, TITLE_CHARS),
         comments=len(tree.comments),
-        threads=[[view(comment) for comment in thread] for thread in tree.threads()],
+        threads=[[comment_view(tree, users, comment) for comment in thread] for thread in tree.threads()],
     )
 
 

@@ -400,3 +400,23 @@ table.budget .used-up {
   color: var(--danger);
   font-weight: 600;
 }
+
+/* Live updates: an empty replies container takes no room, and a comment that arrives fades from a highlight */
+
+.replies:empty {
+  display: none;
+}
+
+.comment.arrived {
+  animation: arrived 4s ease-out;
+}
+
+@keyframes arrived {
+  from {
+    background: var(--highlight);
+  }
+
+  to {
+    background: transparent;
+  }
+}

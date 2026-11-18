@@ -351,17 +351,18 @@ def test_the_post_page_shows_the_post_and_its_threads_oldest_first(settings: Set
 
     assert "<title>Is Rust growing? See the survey. · TechDebate</title>" in html
     assert "<strong>Rust</strong>" in html
-    assert "<h2>4 comments</h2>" in html
+    assert '<h2 id="comment-count">4 comments</h2>' in html
     positions = [html.index(f'id="c{n}"') for n in (1, 2, 3, 4)]
     assert positions == sorted(positions)
-    first, second = html.split('<div class="thread">')[1:]
+    first, second = html.split('<div class="thread"')[1:]
     # The two replies of the first thread sit together, one level under its top-level comment.
-    top, replies = first.split('<div class="replies">')
+    top, replies = first.split('<div class="replies" id="r1">')
     assert 'id="c1"' in top
     assert 'id="c2"' in replies
     assert 'id="c3"' in replies
+    # A thread with no replies has an empty container, for a reply that arrives live.
     assert 'id="c4"' in second
-    assert '<div class="replies">' not in second
+    assert '<div class="replies" id="r4"></div>' in second
 
 
 def test_a_reply_to_a_reply_links_to_the_comment_it_answers(settings: Settings) -> None:
@@ -409,7 +410,7 @@ def test_a_post_with_no_comments(settings: Settings) -> None:
     with TestClient(create_app(settings, agents=False), base_url=BASE_URL) as client:
         html = _page(client, f"/posts/{post.id}")
 
-    assert "<h2>0 comments</h2>" in html
+    assert '<h2 id="comment-count">0 comments</h2>' in html
     assert "No comments yet." in html
 
 
@@ -620,7 +621,7 @@ def test_the_post_page_has_a_box_for_a_comment_and_one_for_a_reply_under_each(se
         comment = comment[: comment.index("</article>")]
         assert '<details class="reply">' in comment
         assert f'<input type="hidden" name="reply_to" value="{n}">' in comment
-    top_box = html[html.index("</article>") : html.index('<section class="comments">')]
+    top_box = html[html.index("</article>") : html.index('<section class="comments"')]
     assert action in top_box
     assert "reply_to" not in top_box
 
@@ -677,7 +678,7 @@ def test_a_post_written_in_the_browser_is_answered_by_the_agents_in_the_app(sett
         html = client.get(location).text
 
     assert '<span class="author">Developer</span> <span class="ai" title="AI agent">AI</span>' in html
-    assert "<h2>1 comment</h2>" in html
+    assert '<h2 id="comment-count">1 comment</h2>' in html
     assert any(visit.agent.username == "developer" and visit.comments == (1,) for visit in visits)
 
 
