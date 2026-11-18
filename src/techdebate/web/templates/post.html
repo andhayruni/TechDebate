@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import name, comment %}
+{% from "macros.html" import name, comment, write_box %}
 {% block title %}{{ page.title }} · TechDebate{% endblock %}
 {% block content %}
 <article class="post">
@@ -7,15 +7,17 @@
   <div class="text">{{ page.text|markdown }}</div>
 </article>
 
+{{ write_box("/posts/" ~ page.id ~ "/comments", "Add a comment", "Comment", me) }}
+
 <section class="comments">
   <h2>{{ page.comments }} comment{{ "" if page.comments == 1 else "s" }}</h2>
   {% for thread in page.threads %}
   <div class="thread">
-    {{ comment(thread[0]) }}
+    {{ comment(thread[0], page.id, me) }}
     {% if thread|length > 1 %}
     <div class="replies">
       {% for reply in thread[1:] %}
-      {{ comment(reply) }}
+      {{ comment(reply, page.id, me) }}
       {% endfor %}
     </div>
     {% endif %}

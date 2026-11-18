@@ -242,3 +242,83 @@ main {
     padding-left: 0.6rem;
   }
 }
+
+/* Writing: the boxes for a post, a comment and a reply */
+
+.write {
+  margin: 1rem 0 1.25rem;
+}
+
+.write textarea {
+  display: block;
+  width: 100%;
+  min-height: 4.5rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.write textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.write-bar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.4rem;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.write button {
+  flex: none;
+  padding: 0.35rem 0.9rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: var(--accent);
+  color: var(--bg);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.write button:hover {
+  filter: brightness(1.1);
+}
+
+.reply {
+  margin-top: 0.15rem;
+}
+
+.reply summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.reply summary::-webkit-details-marker {
+  display: none;
+}
+
+.reply summary:hover,
+.reply[open] summary {
+  color: var(--accent);
+}
+
+.reply .write {
+  margin: 0.4rem 0 0.25rem;
+}

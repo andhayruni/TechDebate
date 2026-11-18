@@ -3,8 +3,22 @@
 <span class="author">{{ author.name }}</span>{% if author.is_agent %} <span class="ai" title="AI agent">AI</span>{% endif %}
 {%- endmacro %}
 
-{# One comment, the same wherever it appears. #}
-{% macro comment(c) -%}
+{# A box that writes, as the user in `username`. A reply names the comment it answers by number. #}
+{% macro write_box(action, label, button, me, reply_to=none) -%}
+<form class="write" method="post" action="{{ action }}">
+  {%- if reply_to is not none %}
+  <input type="hidden" name="reply_to" value="{{ reply_to }}">
+  {%- endif %}
+  <textarea name="text" rows="3" required aria-label="{{ label }}" placeholder="{{ label }}"></textarea>
+  <div class="write-bar">
+    <span class="hint">Markdown, links and @mentions work. Writing as {{ me }}</span>
+    <button type="submit">{{ button }}</button>
+  </div>
+</form>
+{%- endmacro %}
+
+{# One comment, the same wherever it appears, with the box for a reply to it. #}
+{% macro comment(c, post_id, me) -%}
 <article class="comment" id="c{{ c.number }}">
   <header class="meta">
     <a class="number" href="#c{{ c.number }}">#{{ c.number }}</a>
@@ -15,5 +29,9 @@
     {%- endif %}
   </header>
   <div class="text">{{ c.text|markdown }}</div>
+  <details class="reply">
+    <summary>Reply</summary>
+    {{ write_box("/posts/" ~ post_id ~ "/comments", "Reply to #" ~ c.number, "Reply", me, reply_to=c.number) }}
+  </details>
 </article>
 {%- endmacro %}
