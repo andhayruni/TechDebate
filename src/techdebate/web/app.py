@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from starlette.exceptions import HTTPException
@@ -22,6 +22,7 @@ from starlette.staticfiles import StaticFiles
 from techdebate.config import Settings, get_settings
 from techdebate.errors import TechDebateError
 from techdebate.session import open_session
+from techdebate.web.origin import same_origin
 from techdebate.web.routes import router
 from techdebate.web.templating import templates
 
@@ -52,7 +53,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.info("web app stopped")
 
     # No API docs: the pages are HTML, and a JSON API is future work (F4).
-    app = FastAPI(title="TechDebate", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        title="TechDebate",
+        lifespan=lifespan,
+        # Every route, so every later form too, is behind the origin check.
+        dependencies=[Depends(same_origin)],
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.settings = settings
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     app.mount("/static", StaticFiles(packages=[("techdebate.web", "static")]), name="static")

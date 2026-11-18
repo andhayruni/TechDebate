@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from httpx2 import Response
 from jinja2 import UndefinedError
 
 from techdebate.config import Settings
@@ -423,3 +424,196 @@ def test_a_time_is_local_with_the_utc_time_for_machines() -> None:
     tag = time_tag(moment, ZoneInfo("Europe/Berlin"))
 
     assert tag == '<time datetime="2026-11-18T13:05:42Z" title="2026-11-18 13:05 UTC">18 Nov 2026, 14:05</time>'
+
+
+# Writing from the browser
+
+OWN_ORIGIN = {"origin": BASE_URL}
+
+
+async def _read(settings: Settings) -> tuple[list[Message], dict[str, list[tuple[str, str]]]]:
+    """Every message, oldest first, and each user's notifications as (reason, message ID), by username."""
+    async with open_store(settings) as store:
+        messages: list[Message] = []
+        for post in reversed(await store.list_posts()):
+            found = await store.get_post(post.id)
+            assert found is not None
+            messages += [found.post, *found.comments]
+        notified: dict[str, list[tuple[str, str]]] = {}
+        for user in await store.list_users():
+            notifications = await store.list_notifications(user.id, include_closed=True)
+            notified[user.username] = [(n.reason.value, n.message_id) for n in notifications]
+        return messages, notified
+
+
+def _write_from_page(client: TestClient, path: str, data: dict[str, str], **headers: str) -> Response:
+    return client.post(path, data=data, headers=headers or OWN_ORIGIN, follow_redirects=False)
+
+
+def test_a_post_written_from_the_feed_lands_on_its_own_page(client: TestClient, settings: Settings) -> None:
+    response = _write_from_page(client, "/posts", {"text": "  Is **Rust** growing?  "})
+
+    messages, notified = asyncio.run(_read(settings))
+    [post] = messages
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/posts/{post.id}"
+    assert post.text == "Is **Rust** growing?"  # trimmed by Forum, as from the CLI
+    assert notified["developer"] == [("new_post", post.id)]
+    assert notified["scientist"] == [("new_post", post.id)]
+    assert "<strong>Rust</strong>" in client.get(response.headers["location"]).text
+
+
+def test_a_comment_lands_back_on_its_post_at_the_comment(client: TestClient, settings: Settings) -> None:
+    d = asyncio.run(_write_discussion(settings))
+
+    response = _write_from_page(client, f"/posts/{d.post.id}/comments", {"text": "A new thread."})
+
+    messages, _ = asyncio.run(_read(settings))
+    comment = messages[-1]
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/posts/{d.post.id}#c5"
+    assert comment.parent_id == d.post.id
+    assert comment.text == "A new thread."
+
+
+def test_a_reply_lands_under_the_comment_it_answers(client: TestClient, settings: Settings) -> None:
+    d = asyncio.run(_write_discussion(settings))
+
+    response = _write_from_page(client, f"/posts/{d.post.id}/comments", {"text": "Which papers?", "reply_to": "3"})
+
+    messages, notified = asyncio.run(_read(settings))
+    reply = messages[-1]
+    assert response.headers["location"] == f"/posts/{d.post.id}#c5"
+    assert reply.parent_id == d.deeper.id
+    # As from the CLI: the Scientist, who wrote in the thread, is notified.
+    assert ("thread", reply.id) in notified["scientist"]
+    html = client.get(f"/posts/{d.post.id}").text
+    header = html[html.index('id="c5"') :]
+    assert 'replying to <a href="#c3">#3</a>' in header[: header.index("</header>")]
+
+
+def test_a_mention_notifies_the_agent_named(client: TestClient, settings: Settings) -> None:
+    [post] = asyncio.run(_write(settings, ["Is Rust growing?"]))
+
+    _write_from_page(client, f"/posts/{post.id}/comments", {"text": "@Scientist what do the papers say?"})
+
+    messages, notified = asyncio.run(_read(settings))
+    assert ("mention", messages[-1].id) in notified["scientist"]
+    assert ("mention", messages[-1].id) not in notified["developer"]
+
+
+@pytest.mark.parametrize("path", ["/posts", "comments"])
+def test_a_blank_text_is_refused_with_the_400_page(client: TestClient, settings: Settings, path: str) -> None:
+    [post] = asyncio.run(_write(settings, ["A post."]))
+    path = f"/posts/{post.id}/comments" if path == "comments" else path
+
+    response = _write_from_page(client, path, {"text": "  \n  "})
+
+    assert response.status_code == 400
+    assert "the text is blank" in response.text
+    messages, _ = asyncio.run(_read(settings))
+    assert messages == [post]
+
+
+def test_a_comment_on_an_unknown_post_or_number_is_the_404_page(client: TestClient, settings: Settings) -> None:
+    [post] = asyncio.run(_write(settings, ["A post."]))
+
+    unknown_post = _write_from_page(client, "/posts/nope/comments", {"text": "Hello"})
+    unknown_number = _write_from_page(client, f"/posts/{post.id}/comments", {"text": "Hello", "reply_to": "4"})
+
+    assert unknown_post.status_code == 404
+    assert "There is no post here." in unknown_post.text
+    assert unknown_number.status_code == 404
+    assert "There is no comment #4 on this post." in unknown_number.text
+    messages, _ = asyncio.run(_read(settings))
+    assert messages == [post]
+
+
+def test_a_reply_cannot_name_a_comment_by_anything_but_its_number(client: TestClient, settings: Settings) -> None:
+    [post] = asyncio.run(_write(settings, ["A post."]))
+
+    response = _write_from_page(client, f"/posts/{post.id}/comments", {"text": "Hello", "reply_to": "abc"})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"origin": "http://127.0.0.1"},
+        {"origin": "HTTP://127.0.0.1"},
+        {"sec-fetch-site": "same-origin"},
+        {"origin": "http://127.0.0.1", "sec-fetch-site": "same-origin"},
+    ],
+)
+def test_a_write_from_the_apps_own_pages_is_accepted(
+    client: TestClient, settings: Settings, headers: dict[str, str]
+) -> None:
+    response = _write_from_page(client, "/posts", {"text": "Hello"}, **headers)
+
+    assert response.status_code == 303
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"origin": "https://evil.example"},
+        {"origin": "null"},
+        {"origin": "http://localhost"},  # another origin than the one the request was sent to
+        {"origin": "http://127.0.0.1:9999"},
+        {"origin": "https://127.0.0.1"},
+        {"sec-fetch-site": "cross-site"},
+        {"sec-fetch-site": "same-site"},
+        {"sec-fetch-site": "none"},
+    ],
+)
+def test_a_write_from_anywhere_else_is_refused_with_the_403_page(
+    client: TestClient, settings: Settings, headers: dict[str, str]
+) -> None:
+    response = client.post("/posts", data={"text": "Hello"}, headers=headers, follow_redirects=False)
+
+    assert response.status_code == 403
+    assert _in_layout(response.text)
+    assert "Only the app&#39;s own pages can write." in response.text
+    messages, _ = asyncio.run(_read(settings))
+    assert messages == []
+
+
+def test_the_origin_check_comes_before_the_form_is_checked(client: TestClient) -> None:
+    """A refused request learns nothing, not even that its form was incomplete."""
+    assert client.post("/posts", data={}, headers={"origin": "https://evil.example"}).status_code == 403
+
+
+def test_reading_needs_no_origin(client: TestClient) -> None:
+    assert client.get("/", headers={"origin": "https://evil.example"}).status_code == 200
+
+
+def test_the_feed_has_the_box_for_a_post_naming_the_user(db_path: Path) -> None:
+    settings = Settings(_env_file=None, db_path=str(db_path), username="andok")  # pyright: ignore[reportCallIssue]
+
+    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+        html = _page(client, "/")
+
+    assert '<form class="write" method="post" action="/posts">' in html
+    assert '<textarea name="text" rows="3" required' in html
+    assert "Writing as andok" in html
+    assert "No posts yet. Write the first one above." in html
+
+
+def test_the_post_page_has_a_box_for_a_comment_and_one_for_a_reply_under_each(settings: Settings) -> None:
+    d = asyncio.run(_write_discussion(settings))
+
+    with TestClient(create_app(settings), base_url=BASE_URL) as client:
+        html = _page(client, f"/posts/{d.post.id}")
+
+    action = f'action="/posts/{d.post.id}/comments"'
+    assert html.count(action) == 5  # the comment box and one reply box per comment
+    for n in (1, 2, 3, 4):
+        comment = html[html.index(f'id="c{n}"') :]
+        comment = comment[: comment.index("</article>")]
+        assert '<details class="reply">' in comment
+        assert f'<input type="hidden" name="reply_to" value="{n}">' in comment
+    top_box = html[html.index("</article>") : html.index('<section class="comments">')]
+    assert action in top_box
+    assert "reply_to" not in top_box
