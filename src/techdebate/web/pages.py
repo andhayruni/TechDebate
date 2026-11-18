@@ -5,9 +5,12 @@ appears."""
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
+from techdebate.errors import usd_limit
 from techdebate.models import Message, User, UserKind
 from techdebate.roles import display_name
+from techdebate.spending import Spent, Today, duration
 from techdebate.store import PostSummary
 from techdebate.tree import Tree
 from techdebate.views import cut
@@ -119,3 +122,73 @@ def _start(text: str, limit: int) -> str:
     """The start of the text as plain text, or of the text as written when its markdown leaves nothing, such as an
     image with no alt text."""
     return cut(plain_text(text) or " ".join(text.split()), limit)
+
+
+# The budgets
+
+
+@dataclass(frozen=True)
+class Notice:
+    """A budget that is used up, which the pages say under the header: the day's, an agent's or the post's."""
+
+    kind: Literal["day", "agent", "post"]
+    limit: str  # as usd_limit shows it
+    resets_in: str | None  # for the daily budgets
+    author: Author | None = None  # for an agent's
+
+
+def notices(today: Today, post: Spent | None = None) -> list[Notice]:
+    """The budgets used up: the day's, or else each agent's, and the post's. With the day used up every agent has
+    stopped, so the agents' own are not repeated."""
+    resets_in = duration(today.resets_in)
+    found: list[Notice] = []
+    if today.all_agents.used_up:
+        found.append(Notice("day", usd_limit(today.all_agents.limit_usd), resets_in))
+    else:
+        for agent, spent in today.agents:
+            if spent.used_up:
+                found.append(Notice("agent", usd_limit(spent.limit_usd), resets_in, author_of(agent)))
+    if post is not None and post.used_up:
+        found.append(Notice("post", usd_limit(post.limit_usd), None))
+    return found
+
+
+@dataclass(frozen=True)
+class BudgetRow:
+    """One budget: what it has spent, against its limit, and what is left."""
+
+    spent: str
+    limit: str
+    left: str  # "$1.7900 left", or "used up"
+    used_up: bool
+
+
+def budget_row(spent: Spent) -> BudgetRow:
+    left = "used up" if spent.used_up else f"${spent.left_usd:.4f} left"
+    return BudgetRow(f"${spent.spent_usd:.4f}", usd_limit(spent.limit_usd), left, spent.used_up)
+
+
+@dataclass(frozen=True)
+class PostBudget:
+    id: str
+    start: str
+    row: BudgetRow
+
+
+@dataclass(frozen=True)
+class BudgetPage:
+    """What `techdebate budget` shows, and every post's spending."""
+
+    resets_in: str
+    all_agents: BudgetRow
+    agents: list[tuple[Author, BudgetRow]]
+    posts: list[PostBudget]  # newest first
+
+
+def budget_page(today: Today, posts: Sequence[tuple[Message, Spent]]) -> BudgetPage:
+    return BudgetPage(
+        resets_in=duration(today.resets_in),
+        all_agents=budget_row(today.all_agents),
+        agents=[(author_of(agent), budget_row(spent)) for agent, spent in today.agents],
+        posts=[PostBudget(post.id, _start(post.text, TITLE_CHARS), budget_row(spent)) for post, spent in posts],
+    )

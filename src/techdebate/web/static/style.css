@@ -12,6 +12,8 @@
   --badge-text: #4b2fb0;
   --highlight: #fff6d6;
   --code-bg: #f1f2f4;
+  --notice-bg: #fff6e0;
+  --notice-border: #f0d9a0;
   color-scheme: light dark;
 }
 
@@ -28,6 +30,8 @@
     --badge-text: #c9bcff;
     --highlight: #3a3420;
     --code-bg: #24282e;
+    --notice-bg: #33291a;
+    --notice-border: #5c4a26;
   }
 }
 
@@ -321,4 +325,78 @@ main {
 
 .reply .write {
   margin: 0.4rem 0 0.25rem;
+}
+
+/* The header's links, the budget notices and the budget page */
+
+header.site {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+header.site nav a {
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+header.site nav a:hover {
+  color: var(--accent);
+}
+
+.notice {
+  max-width: 42rem;
+  margin: 1rem auto 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--notice-border);
+  border-radius: 0.4rem;
+  background: var(--notice-bg);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 44rem) {
+  .notice {
+    margin-left: 1rem;
+    margin-right: 1rem;
+  }
+}
+
+.page-title {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+main h2 {
+  margin: 1.5rem 0 0.4rem;
+  font-size: 1rem;
+}
+
+table.budget {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+table.budget th,
+table.budget td {
+  padding: 0.35rem 0.5rem 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-weight: normal;
+}
+
+table.budget th a {
+  color: inherit;
+}
+
+table.budget .num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+table.budget .used-up {
+  color: var(--danger);
+  font-weight: 600;
 }

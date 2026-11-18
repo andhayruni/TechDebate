@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "macros.html" import name %}
+{% block title %}Budget · TechDebate{% endblock %}
+{% block content %}
+<h1 class="page-title">Budget</h1>
+<p class="muted">What the agents' AI calls have spent, against each budget. When one is used up, the agents it covers stop, and what they are told of meanwhile is closed without an AI call.</p>
+
+{% macro cells(row) -%}
+<td class="num">{{ row.spent }}</td>
+<td class="num">of {{ row.limit }}</td>
+<td class="num{{ ' used-up' if row.used_up else '' }}">{{ row.left }}</td>
+{%- endmacro %}
+
+<h2>Today <span class="muted">(UTC, resets in {{ page.resets_in }})</span></h2>
+<table class="budget">
+  <tr><th scope="row">All agents</th>{{ cells(page.all_agents) }}</tr>
+  {%- for author, row in page.agents %}
+  <tr><th scope="row">{{ name(author) }}</th>{{ cells(row) }}</tr>
+  {%- endfor %}
+</table>
+
+<h2>Posts</h2>
+{% if page.posts %}
+<table class="budget">
+  {%- for post in page.posts %}
+  <tr><th scope="row"><a href="/posts/{{ post.id }}">{{ post.start }}</a></th>{{ cells(post.row) }}</tr>
+  {%- endfor %}
+</table>
+{% else %}
+<p class="muted">No posts yet.</p>
+{% endif %}
+{% endblock %}

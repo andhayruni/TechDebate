@@ -43,10 +43,11 @@ from techdebate.orchestrator import Visit
 from techdebate.prompts import load_prompt
 from techdebate.roles import ROLE_SPECS
 from techdebate.runner import agents_lock
+from techdebate.spending import duration
 from techdebate.store import open_store
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 from techdebate.tree import Tree
-from techdebate.web import create_app
+from techdebate.web.server import WebServer
 
 
 @pytest.mark.parametrize(
@@ -957,7 +958,7 @@ def test_budget_on_an_unknown_post_fails(
     ],
 )
 def test_the_time_until_the_budgets_reset(left: timedelta, shown: str) -> None:
-    assert cli._duration(left) == shown  # pyright: ignore[reportPrivateUsage]
+    assert duration(left) == shown
 
 
 @pytest.mark.parametrize(
@@ -1195,36 +1196,50 @@ def test_agents_takes_no_argument() -> None:
 
 @dataclass
 class _Served:
-    """What `web` handed to uvicorn."""
+    """What `web` served: the app (or its import path, when it reloads), where, and whether it reloads."""
 
-    app: object
-    kwargs: dict[str, Any]
+    app: object  # a FastAPI app, or its import path when it reloads
+    host: str
+    port: int
+    reload: bool = False
 
 
-def _serve(monkeypatch: pytest.MonkeyPatch, *, interrupt: bool = False) -> list[_Served]:
-    """Replaces uvicorn's server, which would block. With `interrupt`, it ends as uvicorn does after a Ctrl-C."""
+def _serve(monkeypatch: pytest.MonkeyPatch, *, forced: bool = False) -> list[_Served]:
+    """Replaces uvicorn's server, which would block, and its reloader. With `forced`, the server ends as after a second
+    Ctrl-C. The agents get a fake model."""
     served: list[_Served] = []
 
-    def run(app: object, **kwargs: Any) -> None:
-        served.append(_Served(app, kwargs))
-        if interrupt:
-            raise KeyboardInterrupt
+    def serve(server: WebServer) -> None:
+        served.append(_Served(server.config.app, server.config.host, server.config.port))
+        server.forced = forced
 
+    def run(app: str, **kwargs: Any) -> None:
+        assert kwargs.pop("factory") is True
+        assert kwargs.pop("reload") is True
+        served.append(_Served(app, reload=True, **kwargs))
+
+    monkeypatch.setattr(cli, "_serve", serve)
     monkeypatch.setattr(uvicorn, "run", run)
+    monkeypatch.setattr(cli, "_make_llm", lambda: FakeLLM())
     return served
 
 
+def _app(call: _Served) -> FastAPI:
+    assert isinstance(call.app, FastAPI)
+    return call.app
+
+
 @pytest.mark.parametrize(
-    ("argv", "port", "reload"),
-    [(["web"], 8000, False), (["web", "--port", "9000", "--reload"], 9000, True)],
+    ("argv", "port", "reload", "no_agents"),
+    [(["web"], 8000, False, False), (["web", "--port", "9000", "--reload", "--no-agents"], 9000, True, True)],
 )
-def test_web_arguments(argv: list[str], port: int, reload: bool) -> None:
+def test_web_arguments(argv: list[str], port: int, reload: bool, no_agents: bool) -> None:
     args = cli._build_parser().parse_args(argv)  # pyright: ignore[reportPrivateUsage]
 
-    assert (args.port, args.reload) == (port, reload)
+    assert (args.port, args.reload, args.no_agents) == (port, reload, no_agents)
 
 
-def test_web_serves_the_app_on_this_machine_only(
+def test_web_serves_the_app_with_the_agents_on_this_machine_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     db_path = _use_db(monkeypatch, tmp_path)
@@ -1233,11 +1248,26 @@ def test_web_serves_the_app_on_this_machine_only(
     cli.main(["web", "--port", "9000"])
 
     [call] = served
-    assert isinstance(call.app, FastAPI)
-    assert call.kwargs == {"host": "127.0.0.1", "port": 9000}
+    assert (call.host, call.port, call.reload) == ("127.0.0.1", 9000, False)
+    assert _app(call).state.agents is True
     out, err = capsys.readouterr()
     assert out == ""
-    assert err == f"web app on http://127.0.0.1:9000, database {db_path} (Ctrl-C to stop)\n"
+    assert err == f"web app on http://127.0.0.1:9000 with the agents, database {db_path} (Ctrl-C to stop)\n"
+
+
+def test_web_without_agents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    served = _serve(monkeypatch)
+
+    cli.main(["web", "--no-agents"])
+
+    [call] = served
+    assert _app(call).state.agents is False
+    assert capsys.readouterr().err == (
+        f"web app on http://127.0.0.1:8000 without the agents, database {db_path} (Ctrl-C to stop)\n"
+    )
 
 
 def test_web_opens_the_database_before_serving(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1249,29 +1279,86 @@ def test_web_opens_the_database_before_serving(monkeypatch: pytest.MonkeyPatch, 
     assert db_path.exists()
 
 
-def test_web_reload_hands_uvicorn_the_factory_by_its_import_path(
+def test_web_while_the_agents_run_elsewhere_fails_in_one_line_before_serving(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    served = _serve(monkeypatch)
+
+    with agents_lock(_db_settings(db_path)):
+        err = _fails(capsys, ["web"])
+
+    assert err == (
+        "error: the agents are already running on this database (techdebate agents, run or the web app): "
+        "stop it first, or start the web app with --no-agents\n"
+    )
+    assert served == []
+
+
+def test_web_without_agents_serves_while_the_agents_run_elsewhere(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    served = _serve(monkeypatch)
+
+    with agents_lock(_db_settings(db_path)):
+        cli.main(["web", "--no-agents"])
+
+    assert len(served) == 1
+
+
+@pytest.mark.parametrize(
+    ("argv", "factory"), [(["web", "--reload"], cli.web_app), (["web", "--reload", "--no-agents"], cli.web_pages_app)]
+)
+def test_web_reload_hands_uvicorn_its_factory_by_its_import_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argv: list[str], factory: Callable[[], FastAPI]
 ) -> None:
     _use_db(monkeypatch, tmp_path)
     served = _serve(monkeypatch)
 
-    cli.main(["web", "--reload"])
+    cli.main(argv)
 
     [call] = served
-    assert call.kwargs == {"factory": True, "host": "127.0.0.1", "port": 8000, "reload": True}
+    assert (call.host, call.port, call.reload) == ("127.0.0.1", 8000, True)
     assert isinstance(call.app, str)
-    assert import_from_string(call.app) is create_app
+    assert import_from_string(call.app) is factory
 
 
-def test_web_ctrl_c_stops_it_with_0_and_no_message(
+@pytest.mark.parametrize(("factory", "agents"), [(cli.web_app, True), (cli.web_pages_app, False)])
+def test_the_reload_factories_build_the_app_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, factory: Callable[[], FastAPI], agents: bool
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    _serve(monkeypatch)
+
+    app = factory()
+
+    assert app.state.agents is agents
+    assert app.state.settings.db_path == str(db_path)
+
+
+def test_web_first_ctrl_c_stops_it_with_0_and_no_message(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _use_db(monkeypatch, tmp_path)
-    _serve(monkeypatch, interrupt=True)
+    _serve(monkeypatch)
 
     cli.main(["web"])  # returns, so the exit code is 0
 
     assert "interrupted" not in capsys.readouterr().err
+
+
+def test_web_second_ctrl_c_prints_interrupted_and_exits_with_130(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+    _serve(monkeypatch, forced=True)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["web"])
+
+    assert exc.value.code == 130
+    assert capsys.readouterr().err.endswith("interrupted\n")
 
 
 def test_web_with_a_bad_username_fails_in_one_line_before_serving(
@@ -1282,3 +1369,69 @@ def test_web_with_a_bad_username_fails_in_one_line_before_serving(
 
     assert _fails(capsys, ["web"]).startswith("error: username 'Andok' is invalid")
     assert served == []
+
+
+# How the web server stops
+
+
+@dataclass
+class _Runner:
+    in_progress: int
+    cancelled: bool = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+def _web_server(runner: _Runner | None) -> WebServer:
+    app = FastAPI()
+    app.state.runner = runner
+    return WebServer(uvicorn.Config(app), app)
+
+
+def test_the_web_servers_first_signal_lets_the_visits_finish(capsys: pytest.CaptureFixture[str]) -> None:
+    runner = _Runner(in_progress=2)
+    server = _web_server(runner)
+
+    server.handle_exit(signal.SIGINT, None)
+
+    assert server.should_exit
+    assert not server.force_exit
+    assert not server.forced
+    assert not runner.cancelled
+    assert capsys.readouterr().err == "stopping: waiting for 2 visits in progress (Ctrl-C again to stop now)\n"
+
+
+@pytest.mark.parametrize("second", [signal.SIGINT, signal.SIGTERM])
+def test_the_web_servers_second_signal_cancels_the_visits(second: signal.Signals) -> None:
+    runner = _Runner(in_progress=1)
+    server = _web_server(runner)
+
+    server.handle_exit(signal.SIGTERM, None)
+    server.handle_exit(second, None)
+
+    assert server.forced
+    assert server.force_exit
+    assert runner.cancelled
+
+
+def test_the_web_server_without_agents_says_nothing_on_a_signal(capsys: pytest.CaptureFixture[str]) -> None:
+    server = _web_server(None)
+
+    server.handle_exit(signal.SIGINT, None)
+    server.handle_exit(signal.SIGINT, None)
+
+    assert server.forced
+    assert capsys.readouterr().err == ""
+
+
+def test_the_web_server_does_not_send_the_signal_again_once_stopped() -> None:
+    """uvicorn's would, which ends the process with SIGTERM's own code rather than 0."""
+    server = _web_server(None)
+    before = signal.getsignal(signal.SIGTERM)
+
+    with server.capture_signals():
+        assert signal.getsignal(signal.SIGTERM) == server.handle_exit
+        server.handle_exit(signal.SIGTERM, None)
+
+    assert signal.getsignal(signal.SIGTERM) == before  # restored, and the process is still here

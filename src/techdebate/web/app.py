@@ -7,8 +7,8 @@ app answers only requests addressed to this machine, and everything written from
 """
 
 import logging
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from http import HTTPStatus
 from typing import Any
 
@@ -21,6 +21,9 @@ from starlette.staticfiles import StaticFiles
 
 from techdebate.config import Settings, get_settings
 from techdebate.errors import TechDebateError
+from techdebate.llm import AnthropicLLM, LLMClient
+from techdebate.orchestrator import AgentLoop, Visit
+from techdebate.runner import AgentRunner, agents_lock
 from techdebate.session import open_session
 from techdebate.web.origin import same_origin
 from techdebate.web.routes import router
@@ -41,15 +44,43 @@ _HTTP_MESSAGES = {
 }
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """The app, on `settings` or the ones from the environment. `uvicorn --factory` calls it with none."""
+def create_app(
+    settings: Settings | None = None,
+    *,
+    agents: bool = True,
+    llm: LLMClient | None = None,
+    on_visit: Callable[[Visit], None] | None = None,
+) -> FastAPI:
+    """The app, on `settings` or the ones from the environment. `uvicorn --factory` calls it with none.
+
+    With `agents`, the app runs the agents while it runs: it takes the agents' lock, so no other process runs them on
+    the database, and starts the runner, which the forum wakes when a message is written. `llm` is the model the agents
+    call (AnthropicLLM without it), and `on_visit` hears of each visit as it ends."""
     settings = settings or get_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[dict[str, Any]]:
-        async with open_session(settings) as session:
-            log.info("web app started db=%s", settings.db_path)
+        async with open_session(settings) as session, AsyncExitStack() as stack:
+            if agents:
+                stack.enter_context(agents_lock(settings))
+                loop = AgentLoop(
+                    session.store,
+                    session.forum,
+                    session.agents,
+                    llm=llm or AnthropicLLM(settings),
+                    roles=session.roles,
+                    tools=session.tools,
+                    settings=settings,
+                )
+                runner = AgentRunner(loop, poll_s=settings.agent_poll_s, on_visit=on_visit)
+                session.forum.subscribe(runner.wake)
+                await runner.start()
+                # Stopped before the lock is released and the session closed: the visits in progress finish first.
+                stack.push_async_callback(runner.stop)
+                app.state.runner = runner
+            log.info("web app started db=%s agents=%s", settings.db_path, agents)
             yield {"session": session}
+        app.state.runner = None
         log.info("web app stopped")
 
     # No API docs: the pages are HTML, and a JSON API is future work (F4).
@@ -63,6 +94,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None,
     )
     app.state.settings = settings
+    app.state.agents = agents
+    app.state.runner = None  # the agent runner while the app runs, with `agents`
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     app.mount("/static", StaticFiles(packages=[("techdebate.web", "static")]), name="static")
     app.add_exception_handler(TechDebateError, _techdebate_error)
