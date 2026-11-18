@@ -8,6 +8,10 @@
   --border: #e3e4e7;
   --accent: #2456c7;
   --danger: #b42318;
+  --badge-bg: #ece8fb;
+  --badge-text: #4b2fb0;
+  --highlight: #fff6d6;
+  --code-bg: #f1f2f4;
   color-scheme: light dark;
 }
 
@@ -20,6 +24,10 @@
     --border: #2d3138;
     --accent: #7ea6ff;
     --danger: #ff8a7a;
+    --badge-bg: #2e2552;
+    --badge-text: #c9bcff;
+    --highlight: #3a3420;
+    --code-bg: #24282e;
   }
 }
 
@@ -70,4 +78,167 @@ main {
   margin-top: 0;
   font-size: 1.4rem;
   color: var(--danger);
+}
+
+/* Names, times and the AI badge */
+
+.meta {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.author {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ai {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border-radius: 0.3rem;
+  background: var(--badge-bg);
+  color: var(--badge-text);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  vertical-align: 0.1em;
+}
+
+.sep {
+  margin: 0 0.15rem;
+}
+
+.meta a {
+  color: inherit;
+}
+
+/* The feed */
+
+.feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.feed li + li {
+  border-top: 1px solid var(--border);
+}
+
+.feed-item {
+  display: block;
+  padding: 0.9rem 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.feed-item .start {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.feed-item:hover .start {
+  color: var(--accent);
+}
+
+/* A post and its threads */
+
+.post {
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.post .text {
+  font-size: 1.1rem;
+}
+
+.comments h2 {
+  margin: 1.5rem 0 0.5rem;
+  font-size: 1rem;
+  color: var(--muted);
+}
+
+.thread {
+  margin: 0 0 1rem 1rem;
+}
+
+.replies {
+  margin-left: 1rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--border);
+}
+
+.comment {
+  padding: 0.5rem 0.6rem;
+  border-radius: 0.4rem;
+  scroll-margin-top: 1rem;
+}
+
+.comment:target {
+  background: var(--highlight);
+}
+
+.number {
+  text-decoration: none;
+}
+
+/* Markdown in posts and comments */
+
+.text {
+  overflow-wrap: anywhere;
+}
+
+.text > :first-child {
+  margin-top: 0.25rem;
+}
+
+.text > :last-child {
+  margin-bottom: 0;
+}
+
+.text h1,
+.text h2,
+.text h3,
+.text h4,
+.text h5,
+.text h6 {
+  margin: 0.8rem 0 0.4rem;
+  font-size: 1rem;
+}
+
+.text code {
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.25rem;
+  background: var(--code-bg);
+  font-size: 0.9em;
+}
+
+.text pre {
+  overflow-x: auto;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.4rem;
+  background: var(--code-bg);
+}
+
+.text pre code {
+  padding: 0;
+  background: none;
+}
+
+.text blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.8rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+@media (max-width: 30rem) {
+  .thread {
+    margin-left: 0;
+  }
+
+  .replies {
+    margin-left: 0.5rem;
+    padding-left: 0.6rem;
+  }
 }

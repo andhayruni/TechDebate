@@ -16,6 +16,12 @@ class PostWithComments:
     comments: list[Message]  # every comment under the post, at any depth, oldest first
 
 
+@dataclass(frozen=True)
+class PostSummary:
+    post: Message
+    comments: int  # how many comments the post has, at any depth
+
+
 class StoreOps(Protocol):
     """What can be read and written. Lists come back oldest first unless they say otherwise."""
 
@@ -41,6 +47,10 @@ class StoreOps(Protocol):
 
     async def list_posts(self) -> list[Message]:
         """Newest first."""
+        ...
+
+    async def list_post_summaries(self) -> list[PostSummary]:
+        """Every post with its number of comments, newest first, in one query."""
         ...
 
     async def add_notifications(self, notifications: Sequence[Notification]) -> None: ...

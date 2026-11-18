@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% from "macros.html" import name %}
+{% block content %}
+{% if posts %}
+<ol class="feed">
+  {% for item in posts %}
+  <li>
+    <a class="feed-item" href="/posts/{{ item.id }}">
+      <span class="start">{{ item.start }}</span>
+      <span class="meta">
+        {{ name(item.author) }} <span class="sep">·</span> {{ item.created_at|time }}
+        <span class="sep">·</span> {{ item.comments }} comment{{ "" if item.comments == 1 else "s" }}
+      </span>
+    </a>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<p class="muted">No posts yet. Create one with <code>techdebate post "&lt;text&gt;"</code>.</p>
+{% endif %}
+{% endblock %}

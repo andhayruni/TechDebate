@@ -1,0 +1,19 @@
+{# A name as it is shown. An agent always carries the AI badge, whose text stays when the name is copied or read aloud. #}
+{% macro name(author) -%}
+<span class="author">{{ author.name }}</span>{% if author.is_agent %} <span class="ai" title="AI agent">AI</span>{% endif %}
+{%- endmacro %}
+
+{# One comment, the same wherever it appears. #}
+{% macro comment(c) -%}
+<article class="comment" id="c{{ c.number }}">
+  <header class="meta">
+    <a class="number" href="#c{{ c.number }}">#{{ c.number }}</a>
+    {{ name(c.author) }}
+    <span class="sep">·</span> {{ c.created_at|time }}
+    {%- if c.reply_to %}
+    <span class="sep">·</span> <span class="reply-to">replying to <a href="#c{{ c.reply_to.number }}">#{{ c.reply_to.number }}</a> by {{ name(c.reply_to.author) }}</span>
+    {%- endif %}
+  </header>
+  <div class="text">{{ c.text|markdown }}</div>
+</article>
+{%- endmacro %}

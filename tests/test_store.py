@@ -27,7 +27,7 @@ from techdebate.models import (
     User,
     UserKind,
 )
-from techdebate.store import Store, open_store
+from techdebate.store import PostSummary, Store, open_store
 from techdebate.store.tables import Base
 
 
@@ -135,6 +135,26 @@ async def test_list_posts_newest_first_without_comments(store: Store) -> None:
     await store.add_message(newer)
 
     assert await store.list_posts() == [newer, older]
+
+
+async def test_list_post_summaries_counts_the_comments_at_any_depth_newest_first(store: Store) -> None:
+    me, developer = await _users(store)
+    older = Message(author_id=me.id, text="older")
+    newer = Message(author_id=me.id, text="newer").model_copy(update={"created_at": older.created_at})
+    top = _comment(older, developer, "top-level")
+    reply = _comment(top, me, "a reply")
+    deeper = _comment(reply, developer, "a reply to the reply")
+    for message in (older, top, reply, newer, deeper):
+        await store.add_message(message)
+
+    assert await store.list_post_summaries() == [
+        PostSummary(post=newer, comments=0),
+        PostSummary(post=older, comments=3),
+    ]
+
+
+async def test_list_post_summaries_with_no_posts(store: Store) -> None:
+    assert await store.list_post_summaries() == []
 
 
 async def test_foreign_keys_are_enforced(store: Store) -> None:

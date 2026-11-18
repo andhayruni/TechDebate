@@ -1,8 +1,9 @@
 """The web app: the pages a person reads and writes the discussions in, on my own machine.
 
 `create_app` builds the app around one session (the store, the users and the forum), opened when the app starts and
-closed when it stops. Pages get it, and the settings, through the dependencies below. There is no login yet, so the app
-answers only requests addressed to this machine, and everything written from it is written by the user in `username`.
+closed when it stops. Pages get it, and the settings, through the dependencies in `deps`. There is no login yet, so the
+app answers only requests addressed to this machine, and everything written from it is written by the user in
+`username`.
 """
 
 import logging
@@ -13,16 +14,16 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, Response
-from jinja2 import Environment, PackageLoader, StrictUndefined, select_autoescape
+from fastapi.responses import Response
 from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
-from starlette.templating import Jinja2Templates
 
 from techdebate.config import Settings, get_settings
 from techdebate.errors import TechDebateError
-from techdebate.session import Session, open_session
+from techdebate.session import open_session
+from techdebate.web.routes import router
+from techdebate.web.templating import templates
 
 log = logging.getLogger(__name__)
 
@@ -37,16 +38,6 @@ _HTTP_MESSAGES = {
     HTTPStatus.UNPROCESSABLE_ENTITY: "The request has a missing or invalid value.",
     HTTPStatus.INTERNAL_SERVER_ERROR: "Something went wrong on our side. The details are in the app's log.",
 }
-
-templates = Jinja2Templates(
-    env=Environment(
-        loader=PackageLoader("techdebate.web", "templates"),
-        # Text from users and models is escaped, so it cannot add HTML to a page.
-        autoescape=select_autoescape(),
-        # A missing variable fails, as in the prompts, rather than leaving a gap in the page.
-        undefined=StrictUndefined,
-    )
-)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -76,26 +67,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
         return {"status": "ok"}
 
-    @app.get("/", response_class=HTMLResponse, name="home")
-    async def home(request: Request) -> Response:  # pyright: ignore[reportUnusedFunction]
-        return templates.TemplateResponse(request, "home.html")
-
+    app.include_router(router)
     return app
-
-
-# Dependencies
-
-
-def get_session(request: Request) -> Session:
-    """The session the app opened when it started."""
-    session: Session = request.state.session
-    return session
-
-
-def get_app_settings(request: Request) -> Settings:
-    """The settings the app was built with."""
-    settings: Settings = request.app.state.settings
-    return settings
 
 
 # Error pages
