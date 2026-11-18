@@ -655,7 +655,7 @@ def _developer_answers() -> FakeLLM:
         for role in ROLE_SPECS
     ]
     rules += [
-        (prompt("decide.v1"), SpeakDecision(reason="New data.", reply_to=[ReplyTo(place=0, point="It is used.")])),
+        (prompt("decide.v2"), SpeakDecision(reason="New data.", reply_to=[ReplyTo(place=0, point="It is used.")])),
         (prompt("developer.v1"), "Rust is used, by the numbers."),
     ]
     return FakeLLM(rules=rules)
@@ -722,7 +722,7 @@ async def _spend(settings: Settings, post: Message, *costs: tuple[str, float]) -
                 LLMCall(
                     agent_id=agent.id,
                     post_id=post.id,
-                    prompt_id="decide.v1",
+                    prompt_id="decide.v2",
                     model="claude-haiku-5-5",
                     input_tokens=1,
                     output_tokens=1,

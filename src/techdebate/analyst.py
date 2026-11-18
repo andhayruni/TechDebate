@@ -4,7 +4,7 @@ writes the comment."""
 import asyncio
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import GenericAlias
 from typing import Annotated, Any, Literal, cast
 
@@ -23,16 +23,19 @@ log = logging.getLogger(__name__)
 
 # Shared by every role.
 _RESEARCH_PROMPT_ID = "research.v1"
-_DECIDE_PROMPT_ID = "decide.v1"
+_DECIDE_PROMPT_ID = "decide.v2"
 
 
 @dataclass(frozen=True)
 class News:
     """What is new to an agent on a post, by place (0 for the post, n for comment #n): the messages its notifications
-    are about, and the ones in which a user asked it something directly, by mentioning it."""
+    are about, the ones in which a user asked it something directly, by mentioning it, and the comments in which a user
+    asked other agents directly, with their display names. Only the decide call is told about the other agents, and
+    only where the agent was not asked too."""
 
     new: tuple[int, ...]
     asked_in: tuple[int, ...] = ()
+    asked_others: Mapping[int, tuple[str, ...]] = field(default_factory=dict[int, tuple[str, ...]])
 
 
 def _plan_schema(tool_names: Iterable[str]) -> type[ResearchPlan]:
@@ -92,7 +95,8 @@ class Analyst:
         is a pass. Raises ValueError when no place is open, since the call would have nothing to choose from."""
         if not places.open:
             raise ValueError(f"{self._role.name}: no place is open, so there is nothing to decide")
-        content = "\n\n".join([overview, f"{_news(news)}\n{_places(places)}", _tool_report(results)])
+        block = "\n".join(lines for lines in (_news(news), _asked_others(news), _places(places)) if lines)
+        content = "\n\n".join([overview, block, _tool_report(results)])
         request = LLMRequest(
             tier=ModelTier.CHEAP,
             system=self._decide_prompt.render(display_name=self._role.display_name, question=self._role.question),
@@ -189,6 +193,16 @@ def _news(news: News) -> str:
     if news.asked_in:
         lines.append(f"A user asked you directly in {_and(_place_name(place) for place in news.asked_in)}.")
     return "\n".join(lines)
+
+
+def _asked_others(news: News) -> str:
+    """The comments in which a user asked only other agents, one line per comment. Where the agent was asked too, its
+    own line says so, and the others don't change what it does."""
+    return "\n".join(
+        f"{_place_name(place)} is a question from a user to {_and(f'the {name}' for name in names)}, not to you."
+        for place, names in sorted(news.asked_others.items())
+        if place not in news.asked_in
+    )
 
 
 def _places(places: Places) -> str:
