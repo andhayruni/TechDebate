@@ -5,6 +5,7 @@ import os
 import re
 import signal
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,9 +13,12 @@ from typing import Any
 import httpx
 import pytest
 import respx
+import uvicorn
+from fastapi import FastAPI
 from pydantic import HttpUrl
+from uvicorn.importer import import_from_string
 
-from techdebate import cli
+from techdebate import cli, session
 from techdebate.config import Settings
 from techdebate.errors import LLMError, ToolError
 from techdebate.forum import Forum
@@ -42,6 +46,7 @@ from techdebate.runner import agents_lock
 from techdebate.store import open_store
 from techdebate.tools import Tool, ToolInput, ToolRegistry
 from techdebate.tree import Tree
+from techdebate.web import create_app
 
 
 @pytest.mark.parametrize(
@@ -183,7 +188,8 @@ def _use_registry(monkeypatch: pytest.MonkeyPatch, *tools: Tool[Any]) -> None:
     def make(settings: Settings, client: httpx.AsyncClient) -> ToolRegistry:
         return ToolRegistry(tools)
 
-    monkeypatch.setattr(cli, "default_tools", make)
+    monkeypatch.setattr(cli, "default_tools", make)  # for evidence
+    monkeypatch.setattr(session, "default_tools", make)  # for the commands that open a session
 
 
 def test_stub_tool_satisfies_the_protocol() -> None:
@@ -1182,3 +1188,97 @@ def test_the_agents_are_refused_while_another_process_runs_them(
 def test_agents_takes_no_argument() -> None:
     with pytest.raises(SystemExit):
         cli._build_parser().parse_args(["agents", "Rust"])  # pyright: ignore[reportPrivateUsage]
+
+
+# web
+
+
+@dataclass
+class _Served:
+    """What `web` handed to uvicorn."""
+
+    app: object
+    kwargs: dict[str, Any]
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, *, interrupt: bool = False) -> list[_Served]:
+    """Replaces uvicorn's server, which would block. With `interrupt`, it ends as uvicorn does after a Ctrl-C."""
+    served: list[_Served] = []
+
+    def run(app: object, **kwargs: Any) -> None:
+        served.append(_Served(app, kwargs))
+        if interrupt:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(uvicorn, "run", run)
+    return served
+
+
+@pytest.mark.parametrize(
+    ("argv", "port", "reload"),
+    [(["web"], 8000, False), (["web", "--port", "9000", "--reload"], 9000, True)],
+)
+def test_web_arguments(argv: list[str], port: int, reload: bool) -> None:
+    args = cli._build_parser().parse_args(argv)  # pyright: ignore[reportPrivateUsage]
+
+    assert (args.port, args.reload) == (port, reload)
+
+
+def test_web_serves_the_app_on_this_machine_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    served = _serve(monkeypatch)
+
+    cli.main(["web", "--port", "9000"])
+
+    [call] = served
+    assert isinstance(call.app, FastAPI)
+    assert call.kwargs == {"host": "127.0.0.1", "port": 9000}
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == f"web app on http://127.0.0.1:9000, database {db_path} (Ctrl-C to stop)\n"
+
+
+def test_web_opens_the_database_before_serving(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    db_path = _use_db(monkeypatch, tmp_path)
+    _serve(monkeypatch)
+
+    cli.main(["web"])
+
+    assert db_path.exists()
+
+
+def test_web_reload_hands_uvicorn_the_factory_by_its_import_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+    served = _serve(monkeypatch)
+
+    cli.main(["web", "--reload"])
+
+    [call] = served
+    assert call.kwargs == {"factory": True, "host": "127.0.0.1", "port": 8000, "reload": True}
+    assert isinstance(call.app, str)
+    assert import_from_string(call.app) is create_app
+
+
+def test_web_ctrl_c_stops_it_with_0_and_no_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_db(monkeypatch, tmp_path)
+    _serve(monkeypatch, interrupt=True)
+
+    cli.main(["web"])  # returns, so the exit code is 0
+
+    assert "interrupted" not in capsys.readouterr().err
+
+
+def test_web_with_a_bad_username_fails_in_one_line_before_serving(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_db(monkeypatch, tmp_path, username="Andok")
+    served = _serve(monkeypatch)
+
+    assert _fails(capsys, ["web"]).startswith("error: username 'Andok' is invalid")
+    assert served == []
