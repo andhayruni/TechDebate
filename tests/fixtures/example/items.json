@@ -1,0 +1,15 @@
+{
+  "total": 2,
+  "items": [
+    {
+      "title": "First item",
+      "url": "https://api.example.test/items/1",
+      "score": 42
+    },
+    {
+      "title": "Second item",
+      "url": "https://api.example.test/items/2",
+      "score": 7
+    }
+  ]
+}

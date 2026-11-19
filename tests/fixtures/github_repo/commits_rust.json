@@ -1,0 +1,89 @@
+[
+  {
+    "sha": "92b5b8c87c61b20adc9001b41baf587634a74734",
+    "node_id": "C_kwDOAAsO6NoAKDkyYjViOGM4N2M2MWIyMGFkYzkwMDFiNDFiYWY1ODc2MzRhNzQ3MzQ",
+    "commit": {
+      "author": {
+        "name": "bors",
+        "email": "bors@rust-lang.org",
+        "date": "2026-10-29T18:12:51Z"
+      },
+      "committer": {
+        "name": "bors",
+        "email": "bors@rust-lang.org",
+        "date": "2026-10-29T18:12:51Z"
+      },
+      "message": "Auto merge of #165151 - JonathanBrouwer:rollup-tTvBKyF, r=JonathanBrouwer\n\nRollup of 22 pull requests\n\nSuccessful merges:\n\n - rust-lang/rust#165032 (stdarch subtree update)\n - rust-lang/rust#165123 (Temporarily drop macos-26 jobs)\n - rust-lang/rust#165072 (Submodule update of rustc-perf)\n - rust-lang/rust#144090 (Make `IoSlice` and `IoSliceMut` methods unstably const)\n - rust-lang/rust#162342 (More stdarch regression tests)\n - rust-lang/rust#163909 (std: Test the exit behavior of `abort` and `abort_immediate`)\n - rust-lang/rust#164766 (Unstably introduce MVP edition migration lint `unmarked_unchecked_type_aliases` together with bikeshed attribute `#[rustc_unchecked_type_alias]`)\n - rust-lang/rust#164916 (CI: rfl: move job forward to Linux v7.3)\n - rust-lang/rust#164924 (Remove `TypeKind` from `rustc_codegen_ssa`)\n - rust-lang/rust#164969 (perf: avoid allocating HashSet in is_distinct check on small SwitchInts)\n - rust-lang/rust#165083 (Gate `z` inline asm template modifier)\n - rust-lang/rust#165087 (Fix flaky CI test `named_temp_file_new_creates_file`)\n - rust-lang/rust#161131 (Check associated const binding types)\n - rust-lang/rust#161418 (give next-solver's `evaluate_const` its own `try_evaluate_const` logic)\n - rust-lang/rust#164315 (make powerpc `Complex` ABI GCC-compatible)\n - rust-lang/rust#164476 (Avoid ICE on None from prepare_vtable_segments)\n - rust-lang/rust#165003 (follow up for global-alloc-reentry test)\n - rust-lang/rust#165020 (Bless mir-opt panic-abort tests)\n - rust-lang/rust#165066 (skip max_repr_align in Layout::eq_abi)\n - rust-lang/rust#165080 (Syntactically allow C-variadics in parenthesized argument lists)\n - rust-lang/rust#165081 (move `#[rustc_allow_const_fn_unstable]` attr check to attr parsing stage)\n - rust-lang/rust#165082 (Remove stability note from `rust_splat`)",
+      "tree": {
+        "sha": "3f4d432f06deadda6739a5e0116c1e72c66fc5e2",
+        "url": "https://api.github.com/repos/rust-lang/rust/git/trees/3f4d432f06deadda6739a5e0116c1e72c66fc5e2"
+      },
+      "url": "https://api.github.com/repos/rust-lang/rust/git/commits/92b5b8c87c61b20adc9001b41baf587634a74734",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/rust-lang/rust/commits/92b5b8c87c61b20adc9001b41baf587634a74734",
+    "html_url": "https://github.com/rust-lang/rust/commit/92b5b8c87c61b20adc9001b41baf587634a74734",
+    "comments_url": "https://api.github.com/repos/rust-lang/rust/commits/92b5b8c87c61b20adc9001b41baf587634a74734/comments",
+    "author": {
+      "login": "bors",
+      "id": 3372342,
+      "node_id": "MDQ6VXNlcjMzNzIzNDI=",
+      "avatar_url": "https://avatars.githubusercontent.com/u/3372342?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/bors",
+      "html_url": "https://github.com/bors",
+      "followers_url": "https://api.github.com/users/bors/followers",
+      "following_url": "https://api.github.com/users/bors/following{/other_user}",
+      "gists_url": "https://api.github.com/users/bors/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/bors/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/bors/subscriptions",
+      "organizations_url": "https://api.github.com/users/bors/orgs",
+      "repos_url": "https://api.github.com/users/bors/repos",
+      "events_url": "https://api.github.com/users/bors/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/bors/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "bors",
+      "id": 3372342,
+      "node_id": "MDQ6VXNlcjMzNzIzNDI=",
+      "avatar_url": "https://avatars.githubusercontent.com/u/3372342?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/bors",
+      "html_url": "https://github.com/bors",
+      "followers_url": "https://api.github.com/users/bors/followers",
+      "following_url": "https://api.github.com/users/bors/following{/other_user}",
+      "gists_url": "https://api.github.com/users/bors/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/bors/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/bors/subscriptions",
+      "organizations_url": "https://api.github.com/users/bors/orgs",
+      "repos_url": "https://api.github.com/users/bors/repos",
+      "events_url": "https://api.github.com/users/bors/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/bors/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "96a18bf5ffa2b24f9cf3d1c731a9eb121c1acad9",
+        "url": "https://api.github.com/repos/rust-lang/rust/commits/96a18bf5ffa2b24f9cf3d1c731a9eb121c1acad9",
+        "html_url": "https://github.com/rust-lang/rust/commit/96a18bf5ffa2b24f9cf3d1c731a9eb121c1acad9"
+      },
+      {
+        "sha": "839e828e4561ebfdd00a177624f040a03ef98963",
+        "url": "https://api.github.com/repos/rust-lang/rust/commits/839e828e4561ebfdd00a177624f040a03ef98963",
+        "html_url": "https://github.com/rust-lang/rust/commit/839e828e4561ebfdd00a177624f040a03ef98963"
+      }
+    ]
+  }
+]

@@ -1,0 +1,155 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/qjWMwRAvj2aHRlHzHPw9VwMasLE</id>
+  <title>arXiv Query: search_query=ti:"vision transformer"&amp;id_list=&amp;start=0&amp;max_results=5</title>
+  <updated>2026-10-30T18:09:45Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=ti:%22vision+transformer%22&amp;start=0&amp;max_results=5&amp;id_list=" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>5</opensearch:itemsPerPage>
+  <opensearch:totalResults>2017</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2104.08500v4</id>
+    <title>Vision Transformer Pruning</title>
+    <updated>2021-08-14T06:06:37Z</updated>
+    <link href="https://arxiv.org/abs/2104.08500v4" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2104.08500v4" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Vision transformer has achieved competitive performance on a variety of computer vision applications. However, their storage, run-time memory, and computational demands are hindering the deployment to mobile devices. Here we present a vision transformer pruning approach, which identifies the impacts of dimensions in each layer of transformer and then executes pruning accordingly. By encouraging dimension-wise sparsity in the transformer, important dimensions automatically emerge. A great number of dimensions with small importance scores can be discarded to achieve a high pruning ratio without significantly compromising accuracy. The pipeline for vision transformer pruning is as follows: 1) training with sparsity regularization; 2) pruning dimensions of linear projections; 3) fine-tuning. The reduced parameters and FLOPs ratios of the proposed algorithm are well evaluated and analyzed on ImageNet dataset to demonstrate the effectiveness of our proposed method.</summary>
+    <category term="cs.CV" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2021-04-17T09:49:24Z</published>
+    <arxiv:comment>Accepted by the KDD 2021 Workshop on Model Mining</arxiv:comment>
+    <arxiv:primary_category term="cs.CV"/>
+    <author>
+      <name>Mingjian Zhu</name>
+    </author>
+    <author>
+      <name>Yehui Tang</name>
+    </author>
+    <author>
+      <name>Kai Han</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2207.04976v2</id>
+    <title>Dual Vision Transformer</title>
+    <updated>2022-07-12T08:26:22Z</updated>
+    <link href="https://arxiv.org/abs/2207.04976v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2207.04976v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Prior works have proposed several strategies to reduce the computational cost of self-attention mechanism. Many of these works consider decomposing the self-attention procedure into regional and local feature extraction procedures that each incurs a much smaller computational complexity. However, regional information is typically only achieved at the expense of undesirable information lost owing to down-sampling. In this paper, we propose a novel Transformer architecture that aims to mitigate the cost issue, named Dual Vision Transformer (Dual-ViT). The new architecture incorporates a critical semantic pathway that can more efficiently compress token vectors into global semantics with reduced order of complexity. Such compressed global semantics then serve as useful prior information in learning finer pixel level details, through another constructed pixel pathway. The semantic pathway and pixel pathway are then integrated together and are jointly trained, spreading the enhanced self-attention information in parallel through both of the pathways. Dual-ViT is henceforth able to reduce the computational complexity without compromising much accuracy. We empirically demonstrate that Dual-ViT provides superior accuracy than SOTA Transformer architectures with reduced training complexity. Source code is available at \url{https://github.com/YehLi/ImageNetModel}.</summary>
+    <category term="cs.CV" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2022-07-11T16:03:44Z</published>
+    <arxiv:comment>Source code is available at \url{https://github.com/YehLi/ImageNetModel}</arxiv:comment>
+    <arxiv:primary_category term="cs.CV"/>
+    <author>
+      <name>Ting Yao</name>
+    </author>
+    <author>
+      <name>Yehao Li</name>
+    </author>
+    <author>
+      <name>Yingwei Pan</name>
+    </author>
+    <author>
+      <name>Yu Wang</name>
+    </author>
+    <author>
+      <name>Xiao-Ping Zhang</name>
+    </author>
+    <author>
+      <name>Tao Mei</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2206.06801v2</id>
+    <title>Peripheral Vision Transformer</title>
+    <updated>2022-10-13T12:08:14Z</updated>
+    <link href="https://arxiv.org/abs/2206.06801v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2206.06801v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Human vision possesses a special type of visual processing systems called peripheral vision. Partitioning the entire visual field into multiple contour regions based on the distance to the center of our gaze, the peripheral vision provides us the ability to perceive various visual features at different regions. In this work, we take a biologically inspired approach and explore to model peripheral vision in deep neural networks for visual recognition. We propose to incorporate peripheral position encoding to the multi-head self-attention layers to let the network learn to partition the visual field into diverse peripheral regions given training data. We evaluate the proposed network, dubbed PerViT, on ImageNet-1K and systematically investigate the inner workings of the model for machine perception, showing that the network learns to perceive visual data similarly to the way that human vision does. The performance improvements in image classification over the baselines across different model sizes demonstrate the efficacy of the proposed method.</summary>
+    <category term="cs.CV" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2022-06-14T12:47:47Z</published>
+    <arxiv:comment>Accepted to NeurIPS 2022</arxiv:comment>
+    <arxiv:primary_category term="cs.CV"/>
+    <author>
+      <name>Juhong Min</name>
+    </author>
+    <author>
+      <name>Yucheng Zhao</name>
+    </author>
+    <author>
+      <name>Chong Luo</name>
+    </author>
+    <author>
+      <name>Minsu Cho</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2206.10552v2</id>
+    <title>Vicinity Vision Transformer</title>
+    <updated>2023-07-20T08:57:20Z</updated>
+    <link href="https://arxiv.org/abs/2206.10552v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2206.10552v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Vision transformers have shown great success on numerous computer vision tasks. However, its central component, softmax attention, prohibits vision transformers from scaling up to high-resolution images, due to both the computational complexity and memory footprint being quadratic. Although linear attention was introduced in natural language processing (NLP) tasks to mitigate a similar issue, directly applying existing linear attention to vision transformers may not lead to satisfactory results. We investigate this problem and find that computer vision tasks focus more on local information compared with NLP tasks. Based on this observation, we present a Vicinity Attention that introduces a locality bias to vision transformers with linear complexity. Specifically, for each image patch, we adjust its attention weight based on its 2D Manhattan distance measured by its neighbouring patches. In this case, the neighbouring patches will receive stronger attention than far-away patches. Moreover, since our Vicinity Attention requires the token length to be much larger than the feature dimension to show its efficiency advantages, we further propose a new Vicinity Vision Transformer (VVT) structure to reduce the feature dimension without degenerating the accuracy. We perform extensive experiments on the CIFAR100, ImageNet1K, and ADE20K datasets to validate the effectiveness of our method. Our method has a slower growth rate of GFlops than previous transformer-based and convolution-based networks when the input resolution increases. In particular, our approach achieves state-of-the-art image classification accuracy with 50% fewer parameters than previous methods.</summary>
+    <category term="cs.CV" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2022-06-21T17:33:53Z</published>
+    <arxiv:comment>code: https://github.com/OpenNLPLab/Vicinity-Vision-Transformer</arxiv:comment>
+    <arxiv:primary_category term="cs.CV"/>
+    <author>
+      <name>Weixuan Sun</name>
+    </author>
+    <author>
+      <name>Zhen Qin</name>
+    </author>
+    <author>
+      <name>Hui Deng</name>
+    </author>
+    <author>
+      <name>Jianyuan Wang</name>
+    </author>
+    <author>
+      <name>Yi Zhang</name>
+    </author>
+    <author>
+      <name>Kaihao Zhang</name>
+    </author>
+    <author>
+      <name>Nick Barnes</name>
+    </author>
+    <author>
+      <name>Stan Birchfield</name>
+    </author>
+    <author>
+      <name>Lingpeng Kong</name>
+    </author>
+    <author>
+      <name>Yiran Zhong</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2303.08891v1</id>
+    <title>ViTO: Vision Transformer-Operator</title>
+    <updated>2023-03-15T19:24:14Z</updated>
+    <link href="https://arxiv.org/abs/2303.08891v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2303.08891v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>We combine vision transformers with operator learning to solve diverse inverse problems described by partial differential equations (PDEs). Our approach, named ViTO, combines a U-Net based architecture with a vision transformer. We apply ViTO to solve inverse PDE problems of increasing complexity, namely for the wave equation, the Navier-Stokes equations and the Darcy equation. We focus on the more challenging case of super-resolution, where the input dataset for the inverse problem is at a significantly coarser resolution than the output. The results we obtain are comparable or exceed the leading operator network benchmarks in terms of accuracy. Furthermore, ViTO`s architecture has a small number of trainable parameters (less than 10% of the leading competitor), resulting in a performance speed-up of over 5x when averaged over the various test cases.</summary>
+    <category term="cs.CV" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="math.NA" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2023-03-15T19:24:14Z</published>
+    <arxiv:primary_category term="cs.CV"/>
+    <author>
+      <name>Oded Ovadia</name>
+    </author>
+    <author>
+      <name>Adar Kahana</name>
+    </author>
+    <author>
+      <name>Panos Stinis</name>
+    </author>
+    <author>
+      <name>Eli Turkel</name>
+    </author>
+    <author>
+      <name>George Em Karniadakis</name>
+    </author>
+  </entry>
+</feed>

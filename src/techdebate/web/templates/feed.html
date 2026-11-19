@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "macros.html" import name, write_box %}
+{% block content %}
+{{ write_box("/posts", "Write a post: a claim, a question or an idea", "Post", me) }}
+
+{% if posts %}
+<ol class="feed">
+  {% for item in posts %}
+  <li>
+    <a class="feed-item" href="/posts/{{ item.id }}">
+      <span class="start">{{ item.start }}</span>
+      <span class="meta">
+        {{ name(item.author) }} <span class="sep">·</span> {{ item.created_at|time }}
+        <span class="sep">·</span> {{ item.comments }} comment{{ "" if item.comments == 1 else "s" }}
+      </span>
+    </a>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<p class="muted">No posts yet. Write the first one above.</p>
+{% endif %}
+{% endblock %}

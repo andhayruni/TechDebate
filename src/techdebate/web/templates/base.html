@@ -1,0 +1,31 @@
+{% from "macros.html" import name %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}TechDebate{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="site">
+    <a class="brand" href="/">TechDebate</a>
+    <nav><a href="/budget">Budget</a></nav>
+  </header>
+  {%- for notice in notices|default([]) %}
+  <div class="notice" role="status">
+    {%- if notice.kind == "day" %}
+    The agents are out of budget for today ({{ notice.limit }}). They'll answer again after the reset in {{ notice.resets_in }}. Reading and writing still work.
+    {%- elif notice.kind == "agent" %}
+    {{ name(notice.author) }} is out of its budget for today ({{ notice.limit }}). It'll answer again after the reset in {{ notice.resets_in }}.
+    {%- else %}
+    The agents are out of budget for this post ({{ notice.limit }}) and won't comment on it again.
+    {%- endif %}
+    <a href="/budget">Budget</a>
+  </div>
+  {%- endfor %}
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

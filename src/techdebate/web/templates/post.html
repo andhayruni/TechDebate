@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "macros.html" import name, thread, write_box %}
+{% block title %}{{ page.title }} · TechDebate{% endblock %}
+{% block content %}
+<article class="post">
+  <header class="meta">{{ name(page.author) }} <span class="sep">·</span> {{ page.created_at|time }}</header>
+  <div class="text">{{ page.text|markdown }}</div>
+</article>
+
+{{ write_box("/posts/" ~ page.id ~ "/comments", "Add a comment", "Comment", me) }}
+
+<section class="comments" id="comments" data-events="/posts/{{ page.id }}/events?after={{ page.comments }}">
+  <h2 id="comment-count">{{ page.comments }} comment{{ "" if page.comments == 1 else "s" }}</h2>
+  {%- if not page.threads %}
+  <p class="muted" id="no-comments">No comments yet.</p>
+  {%- endif %}
+  <div id="threads">
+    {%- for comments in page.threads %}
+    {{ thread(comments, page.id, me) }}
+    {%- endfor %}
+  </div>
+</section>
+<script src="/static/live.js" defer></script>
+{% endblock %}

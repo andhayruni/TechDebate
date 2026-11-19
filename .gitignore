@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.db
+*.db-*
+*.db.agents.lock
+.pytest_cache/
+.ruff_cache/
+.vscode/
+docs/
+.DS_Store

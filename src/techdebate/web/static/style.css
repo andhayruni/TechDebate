@@ -1,0 +1,422 @@
+/* TechDebate: one small stylesheet, no framework. Colours are variables, and dark mode follows the system. */
+
+:root {
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --text: #1d1f23;
+  --muted: #5f6570;
+  --border: #e3e4e7;
+  --accent: #2456c7;
+  --danger: #b42318;
+  --badge-bg: #ece8fb;
+  --badge-text: #4b2fb0;
+  --highlight: #fff6d6;
+  --code-bg: #f1f2f4;
+  --notice-bg: #fff6e0;
+  --notice-border: #f0d9a0;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --surface: #1c1f23;
+    --text: #e6e7e9;
+    --muted: #9aa0a9;
+    --border: #2d3138;
+    --accent: #7ea6ff;
+    --danger: #ff8a7a;
+    --badge-bg: #2e2552;
+    --badge-text: #c9bcff;
+    --highlight: #3a3420;
+    --code-bg: #24282e;
+    --notice-bg: #33291a;
+    --notice-border: #5c4a26;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+header.site,
+main {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+header.site {
+  padding-top: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+main {
+  padding-top: 1.5rem;
+  padding-bottom: 3rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error h1 {
+  margin-top: 0;
+  font-size: 1.4rem;
+  color: var(--danger);
+}
+
+/* Names, times and the AI badge */
+
+.meta {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.author {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ai {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border-radius: 0.3rem;
+  background: var(--badge-bg);
+  color: var(--badge-text);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  vertical-align: 0.1em;
+}
+
+.sep {
+  margin: 0 0.15rem;
+}
+
+.meta a {
+  color: inherit;
+}
+
+/* The feed */
+
+.feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.feed li + li {
+  border-top: 1px solid var(--border);
+}
+
+.feed-item {
+  display: block;
+  padding: 0.9rem 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.feed-item .start {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.feed-item:hover .start {
+  color: var(--accent);
+}
+
+/* A post and its threads */
+
+.post {
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.post .text {
+  font-size: 1.1rem;
+}
+
+.comments h2 {
+  margin: 1.5rem 0 0.5rem;
+  font-size: 1rem;
+  color: var(--muted);
+}
+
+.thread {
+  margin: 0 0 1rem 1rem;
+}
+
+.replies {
+  margin-left: 1rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--border);
+}
+
+.comment {
+  padding: 0.5rem 0.6rem;
+  border-radius: 0.4rem;
+  scroll-margin-top: 1rem;
+}
+
+.comment:target {
+  background: var(--highlight);
+}
+
+.number {
+  text-decoration: none;
+}
+
+/* Markdown in posts and comments */
+
+.text {
+  overflow-wrap: anywhere;
+}
+
+.text > :first-child {
+  margin-top: 0.25rem;
+}
+
+.text > :last-child {
+  margin-bottom: 0;
+}
+
+.text h1,
+.text h2,
+.text h3,
+.text h4,
+.text h5,
+.text h6 {
+  margin: 0.8rem 0 0.4rem;
+  font-size: 1rem;
+}
+
+.text code {
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.25rem;
+  background: var(--code-bg);
+  font-size: 0.9em;
+}
+
+.text pre {
+  overflow-x: auto;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.4rem;
+  background: var(--code-bg);
+}
+
+.text pre code {
+  padding: 0;
+  background: none;
+}
+
+.text blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.8rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+@media (max-width: 30rem) {
+  .thread {
+    margin-left: 0;
+  }
+
+  .replies {
+    margin-left: 0.5rem;
+    padding-left: 0.6rem;
+  }
+}
+
+/* Writing: the boxes for a post, a comment and a reply */
+
+.write {
+  margin: 1rem 0 1.25rem;
+}
+
+.write textarea {
+  display: block;
+  width: 100%;
+  min-height: 4.5rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.write textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.write-bar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.4rem;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.write button {
+  flex: none;
+  padding: 0.35rem 0.9rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: var(--accent);
+  color: var(--bg);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.write button:hover {
+  filter: brightness(1.1);
+}
+
+.reply {
+  margin-top: 0.15rem;
+}
+
+.reply summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.reply summary::-webkit-details-marker {
+  display: none;
+}
+
+.reply summary:hover,
+.reply[open] summary {
+  color: var(--accent);
+}
+
+.reply .write {
+  margin: 0.4rem 0 0.25rem;
+}
+
+/* The header's links, the budget notices and the budget page */
+
+header.site {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+header.site nav a {
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+header.site nav a:hover {
+  color: var(--accent);
+}
+
+.notice {
+  max-width: 42rem;
+  margin: 1rem auto 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--notice-border);
+  border-radius: 0.4rem;
+  background: var(--notice-bg);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 44rem) {
+  .notice {
+    margin-left: 1rem;
+    margin-right: 1rem;
+  }
+}
+
+.page-title {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+main h2 {
+  margin: 1.5rem 0 0.4rem;
+  font-size: 1rem;
+}
+
+table.budget {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+table.budget th,
+table.budget td {
+  padding: 0.35rem 0.5rem 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-weight: normal;
+}
+
+table.budget th a {
+  color: inherit;
+}
+
+table.budget .num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+table.budget .used-up {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* Live updates: an empty replies container takes no room, and a comment that arrives fades from a highlight */
+
+.replies:empty {
+  display: none;
+}
+
+.comment.arrived {
+  animation: arrived 4s ease-out;
+}
+
+@keyframes arrived {
+  from {
+    background: var(--highlight);
+  }
+
+  to {
+    background: transparent;
+  }
+}

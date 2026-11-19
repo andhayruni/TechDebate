@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ phrase }} · TechDebate{% endblock %}
+{% block content %}
+<section class="error">
+  <h1>{{ status }} {{ phrase }}</h1>
+  {% if message %}<p>{{ message }}</p>{% endif %}
+  <p><a href="/">Back to the posts</a></p>
+</section>
+{% endblock %}
