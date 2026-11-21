@@ -19,17 +19,27 @@ from sqlalchemy.orm import aliased
 from techdebate.config import Settings
 from techdebate.errors import StoreError
 from techdebate.models import (
+    AgentVisit,
     LLMCall,
     Message,
     Notification,
     NotificationOutcome,
     Research,
+    ToolCall,
     ToolResult,
     User,
     UserKind,
 )
 from techdebate.store.base import PostSummary, PostWithComments, Store, StoreOps
-from techdebate.store.tables import LLMCallRow, MessageRow, NotificationRow, ResearchRow, UserRow
+from techdebate.store.tables import (
+    LLMCallRow,
+    MessageRow,
+    NotificationRow,
+    ResearchRow,
+    ToolCallRow,
+    UserRow,
+    VisitRow,
+)
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +63,27 @@ def _notification(row: NotificationRow) -> Notification:
 
 def _llm_call(row: LLMCallRow) -> LLMCall:
     return LLMCall.model_validate(row, from_attributes=True)
+
+
+def _tool_call(row: ToolCallRow) -> ToolCall:
+    return ToolCall.model_validate(row, from_attributes=True)
+
+
+_COMMENT_IDS = TypeAdapter(list[str])
+
+
+def _visit(row: VisitRow) -> AgentVisit:
+    return AgentVisit(
+        id=row.id,
+        agent_id=row.agent_id,
+        post_id=row.post_id,
+        started_at=row.started_at,
+        ended_at=row.ended_at,
+        outcome=None if row.outcome is None else NotificationOutcome(row.outcome),
+        reason=row.reason,
+        at_research=row.at_research,
+        comment_ids=_COMMENT_IDS.validate_json(row.comment_ids),
+    )
 
 
 _RESULTS = TypeAdapter(list[ToolResult])
@@ -144,14 +175,38 @@ class _SessionOps:
             query = query.where(NotificationRow.closed_at.is_(None))
         return [_notification(row) for row in await self._session.scalars(query)]
 
-    async def close_notifications(self, notification_ids: Sequence[str], outcome: NotificationOutcome) -> None:
+    async def close_notifications(
+        self, notification_ids: Sequence[str], outcome: NotificationOutcome, *, visit_id: str | None = None
+    ) -> None:
         if not notification_ids:
             return
         await self._session.execute(
             update(NotificationRow)
             .where(NotificationRow.id.in_(notification_ids), NotificationRow.closed_at.is_(None))
-            .values(closed_at=datetime.now(UTC), outcome=outcome)
+            .values(closed_at=datetime.now(UTC), outcome=outcome, visit_id=visit_id)
         )
+
+    async def add_visit(self, visit: AgentVisit) -> None:
+        comment_ids = _COMMENT_IDS.dump_json(visit.comment_ids).decode()
+        self._session.add(VisitRow(**visit.model_dump(exclude={"comment_ids"}), comment_ids=comment_ids))
+        await self._session.flush()
+
+    async def finish_visit(self, visit: AgentVisit) -> None:
+        await self._session.execute(
+            update(VisitRow)
+            .where(VisitRow.id == visit.id)
+            .values(
+                ended_at=visit.ended_at,
+                outcome=visit.outcome,
+                reason=visit.reason,
+                at_research=visit.at_research,
+                comment_ids=_COMMENT_IDS.dump_json(visit.comment_ids).decode(),
+            )
+        )
+
+    async def list_visits(self, post_id: str) -> list[AgentVisit]:
+        query = select(VisitRow).where(VisitRow.post_id == post_id).order_by(VisitRow.seq)
+        return [_visit(row) for row in await self._session.scalars(query)]
 
     async def add_llm_call(self, call: LLMCall) -> None:
         self._session.add(LLMCallRow(**call.model_dump()))
@@ -160,6 +215,14 @@ class _SessionOps:
     async def list_llm_calls(self, post_id: str) -> list[LLMCall]:
         query = select(LLMCallRow).where(LLMCallRow.post_id == post_id).order_by(LLMCallRow.seq)
         return [_llm_call(row) for row in await self._session.scalars(query)]
+
+    async def add_tool_call(self, call: ToolCall) -> None:
+        self._session.add(ToolCallRow(**call.model_dump()))
+        await self._session.flush()
+
+    async def list_tool_calls(self, post_id: str) -> list[ToolCall]:
+        query = select(ToolCallRow).where(ToolCallRow.post_id == post_id).order_by(ToolCallRow.seq)
+        return [_tool_call(row) for row in await self._session.scalars(query)]
 
     async def spent_usd(
         self, *, post_id: str | None = None, agent_id: str | None = None, since: datetime | None = None
@@ -243,9 +306,23 @@ class SqliteStore:
         async with self._read() as ops:
             return await ops.list_notifications(user_id, include_closed=include_closed)
 
-    async def close_notifications(self, notification_ids: Sequence[str], outcome: NotificationOutcome) -> None:
+    async def close_notifications(
+        self, notification_ids: Sequence[str], outcome: NotificationOutcome, *, visit_id: str | None = None
+    ) -> None:
         async with self.transaction() as tx:
-            await tx.close_notifications(notification_ids, outcome)
+            await tx.close_notifications(notification_ids, outcome, visit_id=visit_id)
+
+    async def add_visit(self, visit: AgentVisit) -> None:
+        async with self.transaction() as tx:
+            await tx.add_visit(visit)
+
+    async def finish_visit(self, visit: AgentVisit) -> None:
+        async with self.transaction() as tx:
+            await tx.finish_visit(visit)
+
+    async def list_visits(self, post_id: str) -> list[AgentVisit]:
+        async with self._read() as ops:
+            return await ops.list_visits(post_id)
 
     async def add_llm_call(self, call: LLMCall) -> None:
         async with self.transaction() as tx:
@@ -254,6 +331,14 @@ class SqliteStore:
     async def list_llm_calls(self, post_id: str) -> list[LLMCall]:
         async with self._read() as ops:
             return await ops.list_llm_calls(post_id)
+
+    async def add_tool_call(self, call: ToolCall) -> None:
+        async with self.transaction() as tx:
+            await tx.add_tool_call(call)
+
+    async def list_tool_calls(self, post_id: str) -> list[ToolCall]:
+        async with self._read() as ops:
+            return await ops.list_tool_calls(post_id)
 
     async def spent_usd(
         self, *, post_id: str | None = None, agent_id: str | None = None, since: datetime | None = None

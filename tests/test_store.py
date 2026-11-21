@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from pydantic import HttpUrl
@@ -16,6 +17,7 @@ from sqlalchemy.exc import IntegrityError, StatementError
 from techdebate.config import Settings
 from techdebate.errors import StoreError
 from techdebate.models import (
+    AgentVisit,
     Evidence,
     LLMCall,
     Message,
@@ -23,11 +25,14 @@ from techdebate.models import (
     NotificationOutcome,
     NotificationReason,
     Research,
+    ToolCall,
+    ToolCallOutcome,
     ToolResult,
     User,
     UserKind,
 )
 from techdebate.store import PostSummary, Store, open_store
+from techdebate.store.sqlite import _alembic_config  # pyright: ignore[reportPrivateUsage]
 from techdebate.store.tables import Base
 
 
@@ -353,6 +358,130 @@ async def test_an_agent_researches_a_post_once(store: Store) -> None:
     assert await store.get_research(developer.id, post.id) == first
 
 
+async def test_a_visit_is_saved_at_its_start_and_finished_later(store: Store) -> None:
+    developer, post, other = await _two_posts(store)
+    first = AgentVisit(agent_id=developer.id, post_id=post.id)
+    elsewhere = AgentVisit(agent_id=developer.id, post_id=other.id)
+    second = AgentVisit(agent_id=developer.id, post_id=post.id)
+    for visit in (first, elsewhere, second):
+        await store.add_visit(visit)
+    comment = _comment(post, developer, "Yes.")
+    await store.add_message(comment)
+
+    [unfinished, _] = await store.list_visits(post.id)
+    finished = first.model_copy(
+        update={
+            "ended_at": datetime(2026, 11, 21, 12, tzinfo=UTC),
+            "outcome": NotificationOutcome.COMMENTED,
+            "reason": "The data is new.",
+            "comment_ids": [comment.id],
+        }
+    )
+    await store.finish_visit(finished)
+
+    assert unfinished == first
+    assert not unfinished.finished and unfinished.outcome is None and unfinished.comment_ids == []
+    assert await store.list_visits(post.id) == [finished, second]  # in the order they started
+    assert await store.list_visits(other.id) == [elsewhere]
+    assert await store.list_visits("unknown") == []
+
+
+async def test_a_pass_at_research_is_finished_with_its_flag(store: Store) -> None:
+    developer, post, _ = await _two_posts(store)
+    visit = AgentVisit(agent_id=developer.id, post_id=post.id)
+    await store.add_visit(visit)
+    passed = visit.model_copy(
+        update={
+            "ended_at": datetime.now(UTC),
+            "outcome": NotificationOutcome.PASSED,
+            "reason": "Not my area.",
+            "at_research": True,
+        }
+    )
+
+    await store.finish_visit(passed)
+
+    assert await store.list_visits(post.id) == [passed]
+
+
+async def test_a_notification_keeps_the_visit_that_closed_it(store: Store) -> None:
+    me, developer, notifications = await _post_with_notifications(store)
+    [for_agent] = await store.list_notifications(developer.id)
+    visit = AgentVisit(agent_id=developer.id, post_id=for_agent.post_id)
+    later = AgentVisit(agent_id=developer.id, post_id=for_agent.post_id)
+    await store.add_visit(visit)
+    await store.add_visit(later)
+
+    await store.close_notifications([for_agent.id], NotificationOutcome.PASSED, visit_id=visit.id)
+    await store.close_notifications([for_agent.id], NotificationOutcome.COMMENTED, visit_id=later.id)
+    await store.close_notifications([notifications[1].id], NotificationOutcome.SEEN)
+
+    [closed] = await store.list_notifications(developer.id, include_closed=True)
+    assert (closed.outcome, closed.visit_id) == (NotificationOutcome.PASSED, visit.id)
+    [seen, _] = await store.list_notifications(me.id, include_closed=True)
+    assert (seen.outcome, seen.visit_id) == (NotificationOutcome.SEEN, None)
+
+
+async def test_an_llm_call_keeps_its_visit_output_and_error(store: Store) -> None:
+    developer, post, _ = await _two_posts(store)
+    visit = AgentVisit(agent_id=developer.id, post_id=post.id)
+    await store.add_visit(visit)
+    returned = _call(developer, post, "decide.v2").model_copy(
+        update={"visit_id": visit.id, "output": '{"reason": "New.", "reply_to": []}'}
+    )
+    failed = _call(developer, post, "developer.v1").model_copy(
+        update={"visit_id": visit.id, "output": None, "error": "Anthropic request timed out", "cost_usd": 0.0}
+    )
+    await store.add_llm_call(returned)
+    await store.add_llm_call(failed)
+
+    assert await store.list_llm_calls(post.id) == [returned, failed]
+    with pytest.raises(IntegrityError):
+        await store.add_llm_call(_call(developer, post, "decide.v2").model_copy(update={"visit_id": "nowhere"}))
+
+
+def _tool_call(visit: AgentVisit, tool: str, query: str, outcome: ToolCallOutcome, evidence: int = 0) -> ToolCall:
+    return ToolCall(
+        visit_id=visit.id,
+        agent_id=visit.agent_id,
+        post_id=visit.post_id,
+        tool=tool,
+        query=query,
+        outcome=outcome,
+        evidence=evidence,
+        error="GitHub search rate limit reached" if outcome is ToolCallOutcome.FAILED else None,
+        duration_s=0.4,
+        created_at=datetime(2026, 11, 21, tzinfo=UTC),
+    )
+
+
+async def test_tool_calls_are_listed_per_post_oldest_first(store: Store) -> None:
+    developer, post, other = await _two_posts(store)
+    visit = AgentVisit(agent_id=developer.id, post_id=post.id)
+    elsewhere = AgentVisit(agent_id=developer.id, post_id=other.id)
+    await store.add_visit(visit)
+    await store.add_visit(elsewhere)
+    calls = [
+        _tool_call(visit, "github_search", "rust", ToolCallOutcome.EVIDENCE, evidence=6),
+        _tool_call(elsewhere, "pypi", "go", ToolCallOutcome.NO_INFORMATION),
+        _tool_call(visit, "github_repo", "rust-lang/rust", ToolCallOutcome.FAILED),
+    ]
+    for call in calls:
+        await store.add_tool_call(call)
+
+    assert await store.list_tool_calls(post.id) == [calls[0], calls[2]]
+    assert await store.list_tool_calls(other.id) == [calls[1]]
+    assert await store.list_tool_calls("unknown") == []
+
+
+async def test_a_tool_call_needs_a_known_visit(store: Store) -> None:
+    developer, post, _ = await _two_posts(store)
+    nowhere = AgentVisit(agent_id=developer.id, post_id=post.id)  # never saved
+
+    with pytest.raises(IntegrityError):
+        await store.add_tool_call(_tool_call(nowhere, "pypi", "httpx", ToolCallOutcome.EVIDENCE, evidence=3))
+
+
 async def test_a_failed_transaction_saves_nothing(store: Store) -> None:
     with pytest.raises(RuntimeError):
         async with store.transaction() as tx:
@@ -384,7 +513,7 @@ async def test_transactions_run_one_after_the_other_across_two_stores(db_path: P
         assert [user.username for user in await first.list_users()] == ["user0", "user1"]
 
 
-_HEAD = "0003"  # the newest migration
+_HEAD = "0004"  # the newest migration
 
 
 def _revision(db_path: Path) -> str:
@@ -429,9 +558,56 @@ async def test_the_migrations_build_the_tables_as_defined(db_path: Path) -> None
     async with open_store(_settings(db_path)):
         pass
 
+    assert _differences(db_path) == []
+
+
+def _differences(db_path: Path) -> list[Any]:
+    """What differs between the database's tables and the table classes."""
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
         differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
     engine.dispose()
+    return differences
 
-    assert differences == []
+
+async def test_the_visits_migration_keeps_the_rows_from_before_it(db_path: Path) -> None:
+    """A database at 0003 with a post, a notification and an AI call, as a user's database is before 0004."""
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        command.upgrade(_alembic_config(connection), "0003")
+    engine.dispose()
+    me = User(username="me", kind=UserKind.REAL)
+    developer = User(username="developer", kind=UserKind.AGENT)
+    post = Message(author_id=me.id, text="Is Rust growing?")
+    notification = Notification(
+        user_id=developer.id, post_id=post.id, message_id=post.id, reason=NotificationReason.NEW_POST
+    )
+    call = _call(developer, post, "research.v1")
+    at = "2026-11-15 00:00:00.000000"
+    with sqlite3.connect(db_path) as connection:
+        for user in (me, developer):
+            connection.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (user.id, user.username, user.kind, at))
+        connection.execute(
+            "INSERT INTO messages (id, author_id, text, created_at) VALUES (?, ?, ?, ?)",
+            (post.id, me.id, post.text, at),
+        )
+        connection.execute(
+            "INSERT INTO notifications (id, user_id, post_id, message_id, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (notification.id, developer.id, post.id, post.id, notification.reason, at),
+        )
+        connection.execute(
+            "INSERT INTO llm_calls (id, agent_id, post_id, prompt_id, model, input_tokens, output_tokens, cost_usd, "
+            "duration_s, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (call.id, developer.id, post.id, call.prompt_id, call.model, 1234, 56, 0.000151, 1.7, at),
+        )
+
+    async with open_store(_settings(db_path)) as store:
+        [kept_notification] = await store.list_notifications(developer.id)
+        [kept_call] = await store.list_llm_calls(post.id)
+
+    assert _revision(db_path) == _HEAD
+    assert (kept_notification.id, kept_notification.visit_id) == (notification.id, None)
+    assert (kept_call.id, kept_call.cost_usd, kept_call.visit_id) == (call.id, 0.000151, None)
+    assert (kept_call.output, kept_call.error) == (None, None)
+    assert _differences(db_path) == []

@@ -7,6 +7,7 @@ from techdebate.tools.format import format_evidence
 from techdebate.tools.github import GitHubRepoTool, GitHubSearchTool
 from techdebate.tools.http import make_http_client
 from techdebate.tools.pypi import PyPITool
+from techdebate.tools.recording import RecordingTool, recording_tools
 from techdebate.tools.registry import ToolRegistry
 from techdebate.tools.youtube import YouTubeTool
 
@@ -15,6 +16,7 @@ __all__ = [
     "GitHubRepoTool",
     "GitHubSearchTool",
     "PyPITool",
+    "RecordingTool",
     "Tool",
     "ToolInput",
     "ToolRegistry",
@@ -22,4 +24,5 @@ __all__ = [
     "default_tools",
     "format_evidence",
     "make_http_client",
+    "recording_tools",
 ]

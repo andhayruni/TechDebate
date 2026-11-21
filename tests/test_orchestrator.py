@@ -13,6 +13,7 @@ from techdebate.forum import Forum
 from techdebate.llm import FakeLLM, LLMRequest, LLMResponse
 from techdebate.llm.fake import Predicate, Reply
 from techdebate.models import (
+    AgentVisit,
     Evidence,
     LLMCall,
     Message,
@@ -22,6 +23,8 @@ from techdebate.models import (
     Research,
     ResearchPlan,
     SpeakDecision,
+    ToolCall,
+    ToolCallOutcome,
     User,
 )
 from techdebate.orchestrator import AgentLoop, Visit
@@ -166,6 +169,7 @@ async def test_an_agent_researches_decides_and_comments_on_the_post(store: Store
         "Developers use [it](https://example.com/x).",
     )
     assert visit == Visit(
+        id=visit.id,
         agent=world.agents["developer"],
         post_id=post.id,
         outcome=NotificationOutcome.COMMENTED,
@@ -774,3 +778,199 @@ async def test_a_visit_costs_its_stored_calls(store: Store) -> None:
 
     assert visit.cost_usd == pytest.approx(0.01 + 0.02 + 0.25)
     assert sum(c.cost_usd for c in await store.list_llm_calls(post.id)) == pytest.approx(visit.cost_usd)
+
+
+# The trace
+
+
+@dataclass
+class _Trace:
+    visits: list[AgentVisit]
+    calls: list[LLMCall]
+    searches: list[ToolCall]
+
+
+async def _trace(world: _World, post: Message) -> _Trace:
+    return _Trace(
+        await world.store.list_visits(post.id),
+        await world.store.list_llm_calls(post.id),
+        await world.store.list_tool_calls(post.id),
+    )
+
+
+async def test_a_visit_is_stored_with_everything_it_did(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    llm = FakeLLM(rules=_comments("developer"))
+
+    [visit] = await world.loop(llm).run()
+
+    trace = await _trace(world, post)
+    [stored] = trace.visits
+    [comment] = (await world.tree(post)).comments
+    assert (stored.id, stored.agent_id, stored.post_id) == (visit.id, world.agents["developer"].id, post.id)
+    assert stored.ended_at is not None and stored.ended_at >= stored.started_at
+    assert (stored.outcome, stored.reason, stored.at_research) == (
+        NotificationOutcome.COMMENTED,
+        "The data is new.",
+        False,
+    )
+    assert stored.comment_ids == [comment.id]
+    assert [n.visit_id for n in await world.notifications("developer")] == [visit.id]
+    # The answer of every call, with the reasons of the research and decide calls.
+    assert [(c.visit_id, c.prompt_id, c.error) for c in trace.calls] == [
+        (visit.id, "research.v1", None),
+        (visit.id, "decide.v2", None),
+        (visit.id, "developer.v1", None),
+    ]
+    research, decide, write = (c.output or "" for c in trace.calls)
+    assert ResearchPlan.model_validate_json(research) == _RESEARCH
+    assert SpeakDecision.model_validate_json(decide) == _COMMENT
+    assert write == comment.text
+    [search] = trace.searches
+    assert (search.visit_id, search.agent_id, search.tool, search.query) == (
+        visit.id,
+        world.agents["developer"].id,
+        "stub",
+        "rust lang",
+    )
+    assert (search.outcome, search.evidence, search.error) == (ToolCallOutcome.EVIDENCE, 1, None)
+
+
+async def test_a_pass_at_research_is_stored_with_its_reason_and_no_search(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+
+    [visit] = await world.loop(FakeLLM(rules=[_plans("developer", _SKIP)])).run()
+
+    trace = await _trace(world, post)
+    [stored] = trace.visits
+    assert (stored.outcome, stored.reason, stored.at_research, stored.comment_ids) == (
+        NotificationOutcome.PASSED,
+        "Not my area.",
+        True,
+        [],
+    )
+    assert [c.visit_id for c in trace.calls] == [visit.id]
+    assert trace.searches == []
+
+
+async def test_a_visit_with_no_ai_call_is_stored_with_its_reason(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.loop(FakeLLM(rules=_comments("developer")), max_comments_per_thread=1).run()
+    [comment] = (await world.tree(post)).comments
+    await world.reply(comment, "Not true.")
+
+    [visit] = await world.loop(FakeLLM(), max_comments_per_thread=1).run()
+
+    first, second = (await _trace(world, post)).visits
+    assert first.outcome is NotificationOutcome.COMMENTED
+    assert (second.id, second.outcome, second.reason) == (
+        visit.id,
+        NotificationOutcome.LIMIT,
+        "no place left on the post",
+    )
+    assert second.finished
+    assert [n.visit_id for n in await world.notifications("developer")] == [first.id, second.id]
+
+
+async def test_a_visit_closed_by_the_budget_at_its_start_is_stored(store: Store) -> None:
+    world = await _world(store)
+    earlier = await world.post("Go")
+    await _handled(world)
+    await _spent(world, "developer", earlier, 0.30)
+    post = await world.post()
+
+    [visit] = await world.loop(FakeLLM(), daily_budget_usd=0.30).run()
+
+    trace = await _trace(world, post)
+    [stored] = trace.visits
+    assert (stored.id, stored.outcome, stored.reason) == (
+        visit.id,
+        NotificationOutcome.BUDGET,
+        "the agents have spent $0.3000 of their $0.30 budget for today",
+    )
+    assert (trace.calls, trace.searches) == ([], [])
+    assert (await world.notifications("developer"))[-1].visit_id == visit.id
+
+
+async def test_the_notifications_closed_and_acted_on_in_one_visit_carry_its_id(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    await world.loop(FakeLLM(rules=_comments("developer")), max_comments_per_thread=1).run()
+    [comment] = (await world.tree(post)).comments
+    await world.reply(comment, "Not true.")  # in the full thread #1, closed as limit
+    await world.reply(post, "Another view.")  # a new thread, acted on
+
+    [visit] = await world.loop(FakeLLM(rules=[_decides("developer", _PASS)]), max_comments_per_thread=1).run()
+
+    later = (await world.notifications("developer"))[1:]
+    assert [(n.outcome, n.visit_id) for n in later] == [
+        (NotificationOutcome.LIMIT, visit.id),
+        (NotificationOutcome.PASSED, visit.id),
+    ]
+    assert (await _trace(world, post)).visits[-1].outcome is NotificationOutcome.PASSED
+
+
+async def test_a_failed_visit_is_stored_with_its_failed_call(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    llm = FakeLLM(rules=[_plans("developer", _RESEARCH)])  # no decide reply
+
+    [visit] = await world.loop(llm).run()
+
+    trace = await _trace(world, post)
+    [stored] = trace.visits
+    assert stored.outcome is NotificationOutcome.FAILED
+    assert stored.reason == visit.reason and "no scripted reply" in stored.reason
+    research, decide = trace.calls
+    assert (research.error, decide.visit_id, decide.prompt_id, decide.model) == (None, visit.id, "decide.v2", "fake")
+    assert decide.error is not None and "no scripted reply" in decide.error
+
+
+async def test_a_failed_search_is_stored_with_its_error(store: Store) -> None:
+    world = await _world(store, tool=_StubTool(error=ToolError("stub: down")))
+    post = await world.post()
+
+    [visit] = await world.loop(FakeLLM(rules=_comments("developer"))).run()
+
+    [search] = (await _trace(world, post)).searches
+    assert (search.visit_id, search.outcome, search.evidence, search.error) == (
+        visit.id,
+        ToolCallOutcome.FAILED,
+        0,
+        "stub: down",
+    )
+
+
+class _Blocking(FakeLLM):
+    """The decide call waits until it is cancelled, so the visit is cut off midway."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.deciding = asyncio.Event()
+
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        if request.prompt_id == "decide.v2":
+            self.deciding.set()
+            await asyncio.Event().wait()
+        return await super().generate(request)
+
+
+async def test_a_visit_cut_off_stays_unfinished_with_its_notifications_pending(store: Store) -> None:
+    world = await _world(store)
+    post = await world.post()
+    llm = _Blocking(rules=[_plans("developer", _RESEARCH)])
+    task = asyncio.create_task(world.loop(llm).visit(world.roles.roles()[0]))
+    await llm.deciding.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    trace = await _trace(world, post)
+    [stored] = trace.visits
+    assert (stored.finished, stored.outcome) == (False, None)
+    assert [c.visit_id for c in trace.calls] == [stored.id]  # the research call made before it was cut off
+    assert [n.pending for n in await world.notifications("developer")] == [True]

@@ -1,5 +1,10 @@
 """Expected failures. The CLI (and later the API) turns these into clean messages instead of tracebacks."""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from techdebate.llm.base import Usage
+
 
 class TechDebateError(Exception):
     """Base for all expected TechDebate failures."""
@@ -14,7 +19,24 @@ class NotFoundError(ToolError):
 
 
 class LLMError(TechDebateError):
-    """The model provider call failed."""
+    """The model provider call failed. When the provider answered (a refusal, output cut off at max_tokens, or output
+    that does not fit the schema), the call is paid for, and the error carries the model that answered, its usage, its
+    cost and its text, so the call can be stored. Otherwise it carries at most the model that was requested."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model: str | None = None,
+        usage: "Usage | None" = None,
+        cost_usd: float = 0.0,
+        text: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.model = model
+        self.usage = usage
+        self.cost_usd = cost_usd
+        self.text = text
 
 
 class PromptError(TechDebateError):

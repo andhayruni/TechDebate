@@ -980,6 +980,7 @@ def test_a_visit_line_names_the_agent_and_what_it_did(
 ) -> None:
     agent = User(username="developer", kind=UserKind.AGENT)
     visit = Visit(
+        id="v1",
         agent=agent,
         post_id="3f2a9c1e0b7d4e8a9c1f2b3d4e5f6a7b",
         outcome=outcome,
