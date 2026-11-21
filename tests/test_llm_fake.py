@@ -79,8 +79,13 @@ async def test_text_reply_is_parsed_into_schema() -> None:
 
 @pytest.mark.parametrize("reply", [Choice(reply_to=3, reason="No such turn"), "not json"])
 async def test_reply_not_matching_schema_raises(reply: Reply) -> None:
-    with pytest.raises(LLMError, match="Pick"):
+    with pytest.raises(LLMError, match="Pick") as raised:
         await _generate_pick(reply)
+
+    # Answered, as AnthropicLLM's error is: it carries the answer, at no cost.
+    text = reply.model_dump_json() if isinstance(reply, BaseModel) else reply
+    assert (raised.value.model, raised.value.text, raised.value.cost_usd) == ("fake", text, 0.0)
+    assert raised.value.usage is not None
 
 
 async def test_model_reply_without_schema_is_text_only() -> None:
@@ -100,8 +105,10 @@ async def test_calls_are_recorded_in_order() -> None:
 
 async def test_unmatched_request_raises() -> None:
     llm = FakeLLM(by_prompt={"hello": "hi"})
-    with pytest.raises(LLMError, match="goodbye"):
+    with pytest.raises(LLMError, match="goodbye") as raised:
         await llm.generate(_request("goodbye"))
+
+    assert (raised.value.model, raised.value.usage, raised.value.text) == ("fake", None, None)
 
 
 def test_fake_satisfies_protocol() -> None:

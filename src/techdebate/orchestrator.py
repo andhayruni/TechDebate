@@ -9,6 +9,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from techdebate.analyst import Analyst, News
 from techdebate.config import Settings
@@ -16,6 +17,7 @@ from techdebate.errors import BudgetExceeded, LLMError
 from techdebate.forum import Forum
 from techdebate.llm import Budget, LLMClient, RecordingLLM, budget_scopes
 from techdebate.models import (
+    AgentVisit,
     Message,
     Notification,
     NotificationOutcome,
@@ -29,7 +31,7 @@ from techdebate.notify import find_mentions
 from techdebate.places import POST, Places, one_per_thread, place_message, places_for
 from techdebate.roles import RoleRegistry, RoleSpec
 from techdebate.store import Store
-from techdebate.tools import ToolRegistry
+from techdebate.tools import ToolRegistry, recording_tools
 from techdebate.tree import Tree
 from techdebate.views import overview_for, thread_for
 
@@ -38,8 +40,9 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Visit:
-    """What one visit of an agent to a post did."""
+    """What one visit of an agent to a post did, as `run` and `agents` print it."""
 
+    id: str  # of the stored AgentVisit
     agent: User
     post_id: str
     outcome: NotificationOutcome
@@ -47,7 +50,7 @@ class Visit:
     notifications: int  # how many it closed
     comments: tuple[int, ...] = ()  # the numbers of the comments it wrote
     at_research: bool = False  # a pass at the research call, not at the decide call
-    cost_usd: float = 0.0  # its AI calls that returned
+    cost_usd: float = 0.0  # its AI calls, failed ones that cost something included
 
 
 @dataclass
@@ -119,7 +122,11 @@ class AgentLoop:
 
     async def visit(self, role: RoleSpec) -> Visit | None:
         """The agent's next visit: to the post of its oldest pending notification, handling every pending notification
-        it has there. None when nothing is pending."""
+        it has there. None when nothing is pending.
+
+        The visit is stored from its start, and what it does carries its ID: the notifications it closes, its AI calls
+        and its searches. It is finished in the transaction that closes its last notifications, so a visit cut off
+        (a second Ctrl-C) stays unfinished, with its notifications still pending."""
         agent = self._agents[role.name]
         pending = await self._pending(role)
         if not pending:
@@ -130,41 +137,29 @@ class AgentLoop:
         assert found is not None, "a notification's post is saved before it"
         tree = Tree.of(found)
         places = places_for(tree, agent.id, max_per_thread=self._settings.max_comments_per_thread)
-        recording = RecordingLLM(self._llm, self._store, agent=agent, post_id=post_id)
+        stored = AgentVisit(agent_id=agent.id, post_id=post_id)
+        await self._store.add_visit(stored)
+        recording = RecordingLLM(self._llm, self._store, agent=agent, post_id=post_id, visit_id=stored.id)
         llm = Budget(recording, self._store, budget_scopes(self._settings), agent=agent, post_id=post_id)
+        tools = recording_tools(self._tools, self._store, agent=agent, post_id=post_id, visit_id=stored.id)
 
         # Step 1: no AI call for what the agent may not act on. A budget used up closes the whole post, so it comes
         # before the limits.
         try:
             await llm.check()
         except BudgetExceeded as e:
-            await self._store.close_notifications([n.id for n in notifications], NotificationOutcome.BUDGET)
-            return _logged(
-                Visit(
-                    agent=agent,
-                    post_id=post_id,
-                    outcome=NotificationOutcome.BUDGET,
-                    reason=str(e),
-                    notifications=len(notifications),
-                )
-            )
+            acted = _Acted(outcome=NotificationOutcome.BUDGET, reason=str(e))
+            return await self._finish(stored, agent, notifications, notifications, acted, cost_usd=0.0)
         closed = [n for n in notifications if _in_full_thread(tree, places, n)]
         active = [n for n in notifications if n not in closed]
-        await self._store.close_notifications([n.id for n in closed], NotificationOutcome.LIMIT)
         if not active:
-            return _logged(
-                Visit(
-                    agent=agent,
-                    post_id=post_id,
-                    outcome=NotificationOutcome.LIMIT,
-                    reason=_limit_reason(places),
-                    notifications=len(closed),
-                )
-            )
+            acted = _Acted(outcome=NotificationOutcome.LIMIT, reason=_limit_reason(places))
+            return await self._finish(stored, agent, closed, closed, acted, cost_usd=0.0)
+        await self._store.close_notifications([n.id for n in closed], NotificationOutcome.LIMIT, visit_id=stored.id)
 
         acted = _Acted()
         try:
-            await self._act(Analyst(role, llm, self._tools, self._settings), agent, tree, places, active, acted)
+            await self._act(Analyst(role, llm, tools, self._settings), agent, tree, places, active, acted)
         except LLMError as e:
             log.warning("visit failed post_id=%s agent=%s error=%s", post_id, role.name, e)
             acted.outcome, acted.reason = NotificationOutcome.FAILED, str(e)
@@ -173,23 +168,49 @@ class AgentLoop:
         except Exception as e:  # a bug: logged with its traceback, without ending the worker or the other agents
             log.exception("visit failed unexpectedly post_id=%s agent=%s", post_id, role.name)
             acted.outcome, acted.reason = NotificationOutcome.FAILED, f"unexpected error: {e!r}"
-        await self._store.close_notifications([n.id for n in active], acted.outcome)
+        return await self._finish(stored, agent, notifications, active, acted, cost_usd=recording.total_usd)
+
+    async def _finish(
+        self,
+        stored: AgentVisit,
+        agent: User,
+        notifications: Sequence[Notification],
+        closing: Sequence[Notification],
+        acted: _Acted,
+        *,
+        cost_usd: float,
+    ) -> Visit:
+        """Closes the visit's last notifications (`closing`) with its outcome, and finishes the stored visit, in one
+        transaction. `notifications` are all the visit handled."""
+        finished = stored.model_copy(
+            update={
+                "ended_at": datetime.now(UTC),
+                "outcome": acted.outcome,
+                "reason": acted.reason,
+                "at_research": acted.at_research,
+                "comment_ids": [comment.id for comment in acted.written],
+            }
+        )
+        async with self._store.transaction() as tx:
+            await tx.close_notifications([n.id for n in closing], acted.outcome, visit_id=stored.id)
+            await tx.finish_visit(finished)
 
         comments: tuple[int, ...] = ()
         if acted.written:  # numbered on the post as it is now, since other agents may have written meanwhile
-            now = await self._store.get_post(post_id)
+            now = await self._store.get_post(stored.post_id)
             assert now is not None
             comments = tuple(Tree.of(now).number(comment) for comment in acted.written)
         return _logged(
             Visit(
+                id=stored.id,
                 agent=agent,
-                post_id=post_id,
+                post_id=stored.post_id,
                 outcome=acted.outcome,
                 reason=acted.reason,
                 notifications=len(notifications),
                 comments=comments,
                 at_research=acted.at_research,
-                cost_usd=recording.total_usd,
+                cost_usd=cost_usd,
             )
         )
 

@@ -130,6 +130,7 @@ class Notification(BaseModel):
     created_at: datetime = Field(default_factory=_now)
     closed_at: datetime | None = None
     outcome: NotificationOutcome | None = None
+    visit_id: str | None = None  # the agent's visit that closed it; None while pending, and for a real user's
 
     @property
     def pending(self) -> bool:
@@ -142,19 +143,62 @@ class Notification(BaseModel):
         return self
 
 
-class LLMCall(BaseModel):
-    """One AI call an agent made on a post, as it returned."""
+class AgentVisit(BaseModel):
+    """One visit of an agent to a post, stored from its start. A visit that was cut off has no end and no outcome."""
 
     id: str = Field(default_factory=_new_id)
     agent_id: str
     post_id: str
+    started_at: datetime = Field(default_factory=_now)
+    ended_at: datetime | None = None
+    outcome: NotificationOutcome | None = None  # what the visit did with the notifications it acted on
+    reason: str = ""  # the reason of the call that ended it, what was full, or the error
+    at_research: bool = False  # a pass at the research call, not at the decide call
+    comment_ids: list[str] = Field(default_factory=list[str])  # the comments it wrote, in the order it wrote them
+
+    @property
+    def finished(self) -> bool:
+        return self.ended_at is not None
+
+
+class LLMCall(BaseModel):
+    """One AI call an agent made on a post: as it returned, or as it failed."""
+
+    id: str = Field(default_factory=_new_id)
+    agent_id: str
+    post_id: str
+    visit_id: str | None = None  # None only for the calls stored before visits were
     prompt_id: str  # which call it was, e.g. "research.v1"
-    model: str  # the model that answered
+    model: str  # the model that answered, or the one requested when none did
     input_tokens: int
     output_tokens: int
     cost_usd: float
     duration_s: float  # the whole call, retries included
-    created_at: datetime = Field(default_factory=_now)  # when the call returned
+    output: str | None = None  # the text of the answer: JSON for a call with a schema. None: no answer
+    error: str | None = None  # why the call failed. None: it returned
+    created_at: datetime = Field(default_factory=_now)  # when the call returned or failed
+
+
+class ToolCallOutcome(StrEnum):
+    EVIDENCE = "evidence"  # the tool returned evidence
+    NO_INFORMATION = "no_information"  # it returned nothing, or found nothing under that name
+    FAILED = "failed"  # it raised
+
+
+class ToolCall(BaseModel):
+    """One search an agent made in a visit. Its evidence is in the agent's research on the post."""
+
+    id: str = Field(default_factory=_new_id)
+    visit_id: str
+    agent_id: str
+    post_id: str
+    tool: str
+    query: str
+    outcome: ToolCallOutcome
+    evidence: int  # how many records came back
+    error: str | None = None  # the message of what it raised
+    duration_s: float
+    created_at: datetime = Field(default_factory=_now)  # when the search ended
 
 
 class Research(BaseModel):

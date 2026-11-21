@@ -79,6 +79,24 @@ class NotificationRow(Base):
     created_at: Mapped[datetime]
     closed_at: Mapped[datetime | None]
     outcome: Mapped[str | None]
+    visit_id: Mapped[str | None] = mapped_column(ForeignKey("visits.id"))
+
+
+class VisitRow(Base):
+    """One visit of an agent to a post. The comment IDs are JSON text: they are only ever read back whole."""
+
+    __tablename__ = "visits"
+
+    seq: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[str] = mapped_column(unique=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    post_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), index=True)  # a post's visits
+    started_at: Mapped[datetime]
+    ended_at: Mapped[datetime | None]
+    outcome: Mapped[str | None]
+    reason: Mapped[str] = mapped_column(Text)
+    at_research: Mapped[bool]
+    comment_ids: Mapped[str] = mapped_column(Text)
 
 
 class LLMCallRow(Base):
@@ -93,6 +111,27 @@ class LLMCallRow(Base):
     input_tokens: Mapped[int]
     output_tokens: Mapped[int]
     cost_usd: Mapped[float]
+    duration_s: Mapped[float]
+    created_at: Mapped[datetime]
+    # Last, as the migration that added them puts them.
+    visit_id: Mapped[str | None] = mapped_column(ForeignKey("visits.id"))
+    output: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class ToolCallRow(Base):
+    __tablename__ = "tool_calls"
+
+    seq: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[str] = mapped_column(unique=True)
+    visit_id: Mapped[str] = mapped_column(ForeignKey("visits.id"))
+    agent_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    post_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), index=True)  # a post's searches
+    tool: Mapped[str]
+    query: Mapped[str] = mapped_column(Text)
+    outcome: Mapped[str]
+    evidence: Mapped[int]
+    error: Mapped[str | None] = mapped_column(Text)
     duration_s: Mapped[float]
     created_at: Mapped[datetime]
 

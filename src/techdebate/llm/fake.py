@@ -11,6 +11,8 @@ from techdebate.llm.base import LLMRequest, LLMResponse, Usage
 Reply: TypeAlias = str | BaseModel
 Predicate: TypeAlias = Callable[[LLMRequest], bool]
 
+_MODEL = "fake"  # the model name on every response and error
+
 
 def _last_user_message(request: LLMRequest) -> str:
     return next((m.content for m in reversed(request.messages) if m.role == "user"), "")
@@ -42,7 +44,13 @@ class FakeLLM:
             try:
                 parsed = schema.model_validate_json(text)
             except ValidationError as e:
-                raise LLMError(f"fake returned output that does not match {schema.__name__}") from e
+                # Answered, like AnthropicLLM's: the error carries the answer.
+                raise LLMError(
+                    f"fake returned output that does not match {schema.__name__}",
+                    model=_MODEL,
+                    usage=Usage(input_tokens=0, output_tokens=0),
+                    text=text,
+                ) from e
         return self._response(request, text=text, parsed=parsed)
 
     def _find_reply(self, request: LLMRequest) -> Reply:
@@ -52,7 +60,7 @@ class FakeLLM:
         for matches, reply in self.rules:
             if matches(request):
                 return reply
-        raise LLMError(f"FakeLLM has no scripted reply for prompt: {prompt!r}")
+        raise LLMError(f"FakeLLM has no scripted reply for prompt: {prompt!r}", model=_MODEL)
 
     @staticmethod
     def _response(request: LLMRequest, text: str, parsed: BaseModel | None = None) -> LLMResponse:
@@ -61,6 +69,6 @@ class FakeLLM:
             parsed=parsed,
             usage=Usage(input_tokens=0, output_tokens=0),
             cost_usd=0.0,
-            model="fake",
+            model=_MODEL,
             prompt_id=request.prompt_id,
         )

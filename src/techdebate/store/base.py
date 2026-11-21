@@ -7,7 +7,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from techdebate.models import LLMCall, Message, Notification, NotificationOutcome, Research, User, UserKind
+from techdebate.models import (
+    AgentVisit,
+    LLMCall,
+    Message,
+    Notification,
+    NotificationOutcome,
+    Research,
+    ToolCall,
+    User,
+    UserKind,
+)
 
 
 @dataclass(frozen=True)
@@ -59,14 +69,35 @@ class StoreOps(Protocol):
         """The user's pending notifications, or all of them with include_closed."""
         ...
 
-    async def close_notifications(self, notification_ids: Sequence[str], outcome: NotificationOutcome) -> None:
-        """Closes the ones still pending, now. A closed notification keeps its first outcome."""
+    async def close_notifications(
+        self, notification_ids: Sequence[str], outcome: NotificationOutcome, *, visit_id: str | None = None
+    ) -> None:
+        """Closes the ones still pending, now, by the visit when an agent's visit closes them. A closed notification
+        keeps its first outcome and visit."""
+        ...
+
+    async def add_visit(self, visit: AgentVisit) -> None:
+        """Saved when the visit starts."""
+        ...
+
+    async def finish_visit(self, visit: AgentVisit) -> None:
+        """Saves how the visit ended: its end, outcome, reason, at_research and comments, from the record."""
+        ...
+
+    async def list_visits(self, post_id: str) -> list[AgentVisit]:
+        """Every visit to the post, by any agent, in the order they started."""
         ...
 
     async def add_llm_call(self, call: LLMCall) -> None: ...
 
     async def list_llm_calls(self, post_id: str) -> list[LLMCall]:
         """Every AI call made on the post, by any agent."""
+        ...
+
+    async def add_tool_call(self, call: ToolCall) -> None: ...
+
+    async def list_tool_calls(self, post_id: str) -> list[ToolCall]:
+        """Every search made on the post, by any agent."""
         ...
 
     async def spent_usd(

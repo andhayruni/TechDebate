@@ -199,6 +199,45 @@ async def test_truncated_structured_output_raises() -> None:
         await llm.generate(_request(schema=Answer))
 
 
+@pytest.mark.parametrize(
+    ("body", "schema"),
+    [
+        (_message("No.", stop_reason="refusal", stop_details={"type": "refusal", "category": "cyber"}), None),
+        (_message('{"name": "buil', stop_reason="max_tokens"), Answer),
+        (_message('{"ok": "maybe"}'), Answer),
+    ],
+    ids=["refusal", "cut off", "schema mismatch"],
+)
+async def test_a_failure_the_provider_answered_carries_the_answer(body: dict[str, Any], schema: Any) -> None:
+    # Sonnet was asked for, Haiku answered: 1,000 input at $0.10/MTok + 200 output at $0.50/MTok
+    with pytest.raises(LLMError) as raised:
+        await _llm(_reply(body)).generate(_request(ModelTier.STRONG, schema=schema))
+
+    error = raised.value
+    assert error.model == "claude-haiku-5-5"
+    assert error.usage == Usage(input_tokens=1_000, output_tokens=200)
+    assert error.cost_usd == pytest.approx(0.0002)
+    assert error.text == body["content"][0]["text"]
+
+
+async def test_an_api_error_carries_only_the_requested_model() -> None:
+    with pytest.raises(LLMError, match="server error") as raised:
+        await _llm(_error(500)).generate(_request(ModelTier.STRONG))
+
+    error = raised.value
+    assert (error.model, error.usage, error.cost_usd, error.text) == ("claude-sonnet-5-5", None, 0.0, None)
+
+
+async def test_a_timeout_carries_only_the_requested_model() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadTimeout("slow", request=request)
+
+    with pytest.raises(LLMError, match="timed out") as raised:
+        await _llm(handler).generate(_request())
+
+    assert (raised.value.model, raised.value.usage, raised.value.cost_usd) == ("claude-haiku-5-5", None, 0.0)
+
+
 async def test_truncated_text_is_returned() -> None:
     response = await _llm(_reply(_message("partial", stop_reason="max_tokens"))).generate(_request())
     assert response.text == "partial"

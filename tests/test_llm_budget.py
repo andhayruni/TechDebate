@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from techdebate.config import Settings
-from techdebate.errors import BudgetExceeded, usd_limit
+from techdebate.errors import BudgetExceeded, LLMError, usd_limit
 from techdebate.llm import (
     Budget,
     BudgetScope,
@@ -15,11 +15,12 @@ from techdebate.llm import (
     Message,
     ModelTier,
     RecordingLLM,
+    Usage,
     budget_scopes,
     end_of_day,
     start_of_day,
 )
-from techdebate.models import LLMCall, User, UserKind
+from techdebate.models import AgentVisit, LLMCall, User, UserKind
 from techdebate.models import Message as Post
 from techdebate.store import Store
 
@@ -30,6 +31,13 @@ class _PricedLLM(FakeLLM):
     async def generate(self, request: LLMRequest) -> LLMResponse:
         response = await super().generate(request)
         return response.model_copy(update={"cost_usd": 0.25})
+
+
+class _RefusingLLM(FakeLLM):
+    """Every call is refused after the provider answered, at $0.25."""
+
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        raise LLMError("m refused the request", model="m", usage=Usage(input_tokens=1, output_tokens=1), cost_usd=0.25)
 
 
 @dataclass(frozen=True)
@@ -65,8 +73,10 @@ async def _users_and_post(store: Store) -> tuple[User, User, Post]:
     return developer, scientist, post
 
 
-def _budget(llm: FakeLLM, store: Store, agent: User, post: Post, limit_usd: float) -> Budget:
-    recording = RecordingLLM(llm, store, agent=agent, post_id=post.id)
+async def _budget(llm: FakeLLM, store: Store, agent: User, post: Post, limit_usd: float) -> Budget:
+    visit = AgentVisit(agent_id=agent.id, post_id=post.id)
+    await store.add_visit(visit)
+    recording = RecordingLLM(llm, store, agent=agent, post_id=post.id, visit_id=visit.id)
     scope = BudgetScope(name="post", limit_usd=limit_usd, by_post=True)
     return Budget(recording, store, [scope], agent=agent, post_id=post.id)
 
@@ -91,7 +101,7 @@ async def _stored_call(store: Store, agent: User, post: Post, cost_usd: float, c
 async def test_calls_are_passed_on_until_the_post_has_spent_its_budget(store: Store) -> None:
     developer, _, post = await _users_and_post(store)
     llm = _PricedLLM(rules=[(lambda _: True, "ok")])
-    budget = _budget(llm, store, developer, post, limit_usd=0.50)
+    budget = await _budget(llm, store, developer, post, limit_usd=0.50)
 
     await budget.generate(_request())
     await budget.generate(_request())  # $0.25 spent, under the budget
@@ -105,14 +115,24 @@ async def test_calls_are_passed_on_until_the_post_has_spent_its_budget(store: St
     assert str(error) == "the post has spent $0.5000 of its $0.50 budget"
 
 
+async def test_a_failed_call_that_cost_something_counts(store: Store) -> None:
+    developer, _, post = await _users_and_post(store)
+    budget = await _budget(_RefusingLLM(), store, developer, post, limit_usd=0.25)
+
+    with pytest.raises(LLMError, match="refused"):
+        await budget.generate(_request())  # paid for, though it failed
+    with pytest.raises(BudgetExceeded):
+        await budget.check()
+
+
 async def test_the_post_budget_counts_the_calls_of_every_agent_on_the_post(store: Store) -> None:
     developer, scientist, post = await _users_and_post(store)
     llm = _PricedLLM(rules=[(lambda _: True, "ok")])
-    await _budget(llm, store, developer, post, limit_usd=0.30).generate(_request())
+    await (await _budget(llm, store, developer, post, limit_usd=0.30)).generate(_request())
 
     with pytest.raises(BudgetExceeded):
-        await _budget(llm, store, scientist, post, limit_usd=0.25).check()
-    await _budget(llm, store, scientist, post, limit_usd=0.30).check()  # $0.25 is below $0.30
+        await (await _budget(llm, store, scientist, post, limit_usd=0.25)).check()
+    await (await _budget(llm, store, scientist, post, limit_usd=0.30)).check()  # $0.25 is below $0.30
 
 
 async def test_a_call_on_another_post_does_not_count(store: Store) -> None:
@@ -120,9 +140,9 @@ async def test_a_call_on_another_post_does_not_count(store: Store) -> None:
     other = Post(author_id=post.author_id, text="Is Go growing?")
     await store.add_message(other)
     llm = _PricedLLM(rules=[(lambda _: True, "ok")])
-    await _budget(llm, store, developer, other, limit_usd=1.0).generate(_request())
+    await (await _budget(llm, store, developer, other, limit_usd=1.0)).generate(_request())
 
-    await _budget(llm, store, developer, post, limit_usd=0.25).check()
+    await (await _budget(llm, store, developer, post, limit_usd=0.25)).check()
 
 
 async def test_the_first_scope_used_up_is_the_one_named(store: Store) -> None:
