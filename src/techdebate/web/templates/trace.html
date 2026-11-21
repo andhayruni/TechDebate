@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% from "macros.html" import name %}
+{% block title %}Trace · {{ page.start }} · TechDebate{% endblock %}
+{% block content %}
+{#- Everything here from a model or a tool is plain text, escaped: none of it is rendered as markdown. #}
+<h1 class="page-title">Trace</h1>
+<p class="muted">Of <a href="/posts/{{ page.post_id }}">{{ page.start }}</a>: every visit of an agent to the post, in the order they started, with what it handled, searched, asked the model and wrote.</p>
+
+{%- if page.waiting %}
+<p class="waiting">Waiting: {% for author, count in page.waiting %}{{ name(author) }} {{ count }}{{ ", " if not loop.last }}{% endfor %}</p>
+{%- endif %}
+
+{% macro call(c, with_author=false) -%}
+<li class="call">
+  <div class="call-head">
+    {%- if with_author %}{{ name(c.author) }} <span class="sep">·</span> {% endif -%}
+    <code>{{ c.prompt_id }}</code> <span class="sep">·</span> {{ c.model }}
+    <span class="sep">·</span> <span class="num">{{ c.input_tokens }} in, {{ c.output_tokens }} out</span>
+    <span class="sep">·</span> <span class="num">{{ c.cost }}</span> <span class="sep">·</span> <span class="num">{{ c.duration }}</span>
+  </div>
+  {%- if c.error %}
+  <p class="error-line">Failed: {{ c.error }}</p>
+  {%- endif %}
+  {%- if c.kind == "research" %}
+  <div class="answer">
+    <p>{{ "Researched" if c.answer.researched else "Did not research" }}: {{ c.answer.reason }}</p>
+    {%- if c.answer.queries %}
+    <ul>
+      {%- for tool, queries in c.answer.queries %}
+      <li><code>{{ tool }}</code>: {% if queries %}{% for q in queries %}“{{ q }}”{{ ", " if not loop.last }}{% endfor %}{% else %}<span class="muted">not used</span>{% endif %}</li>
+      {%- endfor %}
+    </ul>
+    {%- endif %}
+  </div>
+  {%- elif c.kind == "decide" %}
+  <div class="answer">
+    <p>{{ c.answer.reason }}</p>
+    {%- if c.answer.places %}
+    <ul>
+      {%- for place, point in c.answer.places %}
+      <li>{{ place }}: {{ point }}</li>
+      {%- endfor %}
+    </ul>
+    {%- else %}
+    <p class="muted">No place: a pass.</p>
+    {%- endif %}
+  </div>
+  {%- elif c.kind == "write" and c.answer.comment is not none %}
+  <p class="answer">Wrote <a href="/posts/{{ page.post_id }}#c{{ c.answer.comment }}">#{{ c.answer.comment }}</a>.</p>
+  {%- endif %}
+  {%- if c.raw is not none %}
+  <details class="raw"{% if c.kind == "raw" or (c.kind == "write" and c.answer.comment is none) %} open{% endif %}>
+    <summary>Answer as given</summary>
+    <pre>{{ c.raw }}</pre>
+  </details>
+  {%- endif %}
+</li>
+{%- endmacro %}
+
+<h2>Totals</h2>
+<table class="budget totals">
+  <tr><th scope="col"></th><th scope="col" class="num">Visits</th><th scope="col" class="num">AI calls</th><th scope="col" class="num">Tokens in</th><th scope="col" class="num">Tokens out</th><th scope="col" class="num">Searches</th><th scope="col" class="num">Cost</th></tr>
+  {%- for t in page.totals %}
+  <tr{% if t.author is none %} class="all"{% endif %}>
+    <th scope="row">{% if t.author is none %}The post{% else %}{{ name(t.author) }}{% endif %}</th>
+    <td class="num">{{ t.visits }}</td><td class="num">{{ t.calls }}</td><td class="num">{{ t.input_tokens }}</td>
+    <td class="num">{{ t.output_tokens }}</td><td class="num">{{ t.searches }}</td><td class="num">{{ t.cost }}</td>
+  </tr>
+  {%- endfor %}
+</table>
+
+<h2>Visits</h2>
+{%- if page.visits %}
+<ol class="visits">
+  {%- for v in page.visits %}
+  <li>
+    <details class="visit{{ ' attention' if v.open }}"{% if v.open %} open{% endif %}>
+      <summary>
+        <span class="visit-number">{{ v.number }}</span>
+        {{ name(v.author) }} <span class="did">{{ v.did }}
+        {%- for n in v.comments %} <a href="/posts/{{ page.post_id }}#c{{ n }}">#{{ n }}</a>{{ "," if not loop.last }}{% endfor %}</span>
+        <span class="meta">{{ v.started_at|time_s }}{% if v.duration %} <span class="sep">·</span> {{ v.duration }}{% endif %} <span class="sep">·</span> {{ v.cost }}</span>
+        {%- if v.reason %}
+        <span class="reason">{{ v.reason }}</span>
+        {%- endif %}
+      </summary>
+      <div class="visit-body">
+        <h3>Handled</h3>
+        {%- if v.handled %}
+        <ul>
+          {%- for h in v.handled %}
+          <li>{% if h.number is not none %}<a href="/posts/{{ page.post_id }}#c{{ h.number }}">{{ h.place }}</a>{% else %}{{ h.place }}{% endif %}, {{ h.reason }}: <span class="outcome">{{ h.outcome }}</span></li>
+          {%- endfor %}
+        </ul>
+        {%- else %}
+        <p class="muted">None closed yet.</p>
+        {%- endif %}
+
+        {%- if v.searches %}
+        <h3>Searches</h3>
+        <ul>
+          {%- for s in v.searches %}
+          <li class="search">
+            <details>
+              <summary><code>{{ s.tool }}</code> “{{ s.query }}”: {{ s.outcome }}{% if s.records %}, {{ s.records }} record{{ "" if s.records == 1 else "s" }}{% endif %} <span class="sep">·</span> <span class="num">{{ s.duration }}</span></summary>
+              {%- if s.error %}
+              <p class="error-line">{{ s.error }}</p>
+              {%- endif %}
+              {%- if s.evidence is none %}
+              <p class="muted">The evidence was never saved: the visit was cut off before its research was.</p>
+              {%- elif s.evidence %}
+              <ul class="evidence">
+                {%- for e in s.evidence %}
+                <li><a href="{{ e.url }}" target="_blank" rel="nofollow noopener noreferrer">{{ e.title }}</a><br><span class="muted">{{ e.summary }}</span></li>
+                {%- endfor %}
+              </ul>
+              {%- else %}
+              <p class="muted">No records.</p>
+              {%- endif %}
+            </details>
+          </li>
+          {%- endfor %}
+        </ul>
+        {%- endif %}
+
+        {%- if v.calls %}
+        <h3>AI calls</h3>
+        <ul class="calls">
+          {%- for c in v.calls %}
+          {{ call(c) }}
+          {%- endfor %}
+        </ul>
+        {%- endif %}
+      </div>
+    </details>
+  </li>
+  {%- endfor %}
+</ol>
+{%- else %}
+<p class="muted">No visits yet.</p>
+{%- endif %}
+
+{%- if page.earlier %}
+<h2>Earlier calls</h2>
+<p class="muted">AI calls stored before visits were. They count in the totals.</p>
+<ul class="calls">
+  {%- for c in page.earlier %}
+  {{ call(c, with_author=true) }}
+  {%- endfor %}
+</ul>
+{%- endif %}
+{% endblock %}

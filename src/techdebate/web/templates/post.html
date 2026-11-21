@@ -3,7 +3,7 @@
 {% block title %}{{ page.title }} · TechDebate{% endblock %}
 {% block content %}
 <article class="post">
-  <header class="meta">{{ name(page.author) }} <span class="sep">·</span> {{ page.created_at|time }}</header>
+  <header class="meta">{{ name(page.author) }} <span class="sep">·</span> {{ page.created_at|time }} <span class="sep">·</span> <a href="/posts/{{ page.id }}/trace">Trace</a></header>
   <div class="text">{{ page.text|markdown }}</div>
 </article>
 

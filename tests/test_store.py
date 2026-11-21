@@ -212,6 +212,22 @@ async def test_notifications_are_listed_per_user_oldest_first(store: Store) -> N
     assert await store.list_notifications(developer.id) == notifications[:1]
 
 
+async def test_a_posts_notifications_are_listed_for_every_user_pending_or_closed(store: Store) -> None:
+    me, _, notifications = await _post_with_notifications(store)
+    other = Message(author_id=me.id, text="Is Go growing?")
+    await store.add_message(other)
+    await store.add_notifications(
+        [Notification(user_id=me.id, post_id=other.id, message_id=other.id, reason=NotificationReason.MENTION)]
+    )
+    await store.close_notifications([notifications[1].id], NotificationOutcome.SEEN)
+
+    listed = await store.list_post_notifications(notifications[0].post_id)
+
+    assert [n.id for n in listed] == [n.id for n in notifications]  # oldest first, the other post's left out
+    assert [n.pending for n in listed] == [True, False, True]
+    assert await store.list_post_notifications("unknown") == []
+
+
 async def test_closed_notifications_keep_their_first_outcome(store: Store) -> None:
     me, _, notifications = await _post_with_notifications(store)
     top_level, mention = notifications[1:]
