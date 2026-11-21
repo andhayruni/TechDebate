@@ -17,6 +17,7 @@ from techdebate.web.deps import get_app_settings, get_session
 from techdebate.web.events import EventBus, comment_events
 from techdebate.web.pages import Notice, budget_page, feed, notices, post_page
 from techdebate.web.templating import macro, templates
+from techdebate.web.trace import trace_page
 
 router = APIRouter(default_response_class=HTMLResponse)
 
@@ -53,6 +54,30 @@ async def show_post(request: Request, post_id: str, session: CurrentSession, set
         "notices": await _notices(session, settings, post_id),
     }
     return templates.TemplateResponse(request, "post.html", context)
+
+
+@router.get("/posts/{post_id}/trace", name="trace")
+async def trace(request: Request, post_id: str, session: CurrentSession, settings: CurrentSettings) -> Response:
+    """Everything the agents did on the post, visit by visit, from the stored trace."""
+    store = session.store
+    tree = Tree.of(await _post(store, post_id))
+    visits = await store.list_visits(post_id)
+    research = [
+        found
+        for agent_id in dict.fromkeys(visit.agent_id for visit in visits)
+        if (found := await store.get_research(agent_id, post_id)) is not None
+    ]
+    page = trace_page(
+        tree,
+        {user.id: user for user in await store.list_users()},
+        visits,
+        await store.list_post_notifications(post_id),
+        await store.list_llm_calls(post_id),
+        await store.list_tool_calls(post_id),
+        research,
+    )
+    context = {"page": page, "notices": await _notices(session, settings, post_id)}
+    return templates.TemplateResponse(request, "trace.html", context)
 
 
 @router.get("/posts/{post_id}/events", name="post_events")

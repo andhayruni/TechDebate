@@ -175,6 +175,10 @@ class _SessionOps:
             query = query.where(NotificationRow.closed_at.is_(None))
         return [_notification(row) for row in await self._session.scalars(query)]
 
+    async def list_post_notifications(self, post_id: str) -> list[Notification]:
+        query = select(NotificationRow).where(NotificationRow.post_id == post_id).order_by(NotificationRow.seq)
+        return [_notification(row) for row in await self._session.scalars(query)]
+
     async def close_notifications(
         self, notification_ids: Sequence[str], outcome: NotificationOutcome, *, visit_id: str | None = None
     ) -> None:
@@ -305,6 +309,10 @@ class SqliteStore:
     async def list_notifications(self, user_id: str, *, include_closed: bool = False) -> list[Notification]:
         async with self._read() as ops:
             return await ops.list_notifications(user_id, include_closed=include_closed)
+
+    async def list_post_notifications(self, post_id: str) -> list[Notification]:
+        async with self._read() as ops:
+            return await ops.list_post_notifications(post_id)
 
     async def close_notifications(
         self, notification_ids: Sequence[str], outcome: NotificationOutcome, *, visit_id: str | None = None

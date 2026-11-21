@@ -69,6 +69,10 @@ class StoreOps(Protocol):
         """The user's pending notifications, or all of them with include_closed."""
         ...
 
+    async def list_post_notifications(self, post_id: str) -> list[Notification]:
+        """Every notification on the post, for any user, pending or closed."""
+        ...
+
     async def close_notifications(
         self, notification_ids: Sequence[str], outcome: NotificationOutcome, *, visit_id: str | None = None
     ) -> None:

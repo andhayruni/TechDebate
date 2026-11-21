@@ -420,3 +420,167 @@ table.budget .used-up {
     background: transparent;
   }
 }
+
+/* The trace: a line per visit, its details folded under it */
+
+.waiting {
+  padding: 0.4rem 0.7rem;
+  border-left: 3px solid var(--notice-border);
+  background: var(--notice-bg);
+  font-size: 0.9rem;
+}
+
+table.totals tr.all th,
+table.totals tr.all td {
+  font-weight: 600;
+}
+
+table.totals th[scope="col"] {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.visits,
+.visit-body ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.visits > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.visit > summary {
+  padding: 0.55rem 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.visit > summary::-webkit-details-marker {
+  display: none;
+}
+
+.visit-number {
+  display: inline-block;
+  min-width: 1.6rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.visit.attention .did {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.visit .meta {
+  margin-left: 0.3rem;
+}
+
+.visit .reason {
+  display: block;
+  overflow: hidden;
+  margin-left: 1.6rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visit[open] .reason {
+  white-space: normal;
+}
+
+.visit-body {
+  margin: 0 0 1rem 1.6rem;
+  font-size: 0.9rem;
+}
+
+.visit-body h3 {
+  margin: 0.8rem 0 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.visit-body li + li {
+  margin-top: 0.3rem;
+}
+
+.outcome {
+  font-weight: 600;
+}
+
+.search summary,
+.raw summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.visit-body .evidence {
+  margin: 0.3rem 0 0.5rem 1rem;
+}
+
+.call {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface);
+}
+
+.call-head {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.call .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.answer p,
+.answer ul {
+  margin: 0.3rem 0;
+}
+
+.visit-body .answer ul,
+.calls .answer ul {
+  margin-left: 1rem;
+  padding-left: 0.5rem;
+  list-style: disc;
+}
+
+.error-line {
+  margin: 0.3rem 0;
+  color: var(--danger);
+}
+
+.raw summary {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.raw pre {
+  overflow-x: auto;
+  margin: 0.3rem 0 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 0.4rem;
+  background: var(--code-bg);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+code {
+  font-size: 0.9em;
+}
+
+.calls {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.calls > li + li {
+  margin-top: 0.4rem;
+}

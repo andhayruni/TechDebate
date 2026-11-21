@@ -51,7 +51,7 @@ def feed(summaries: Sequence[PostSummary], users: Mapping[str, User]) -> list[Fe
             id=summary.post.id,
             author=author_of(users[summary.post.author_id]),
             created_at=summary.post.created_at,
-            start=_start(summary.post.text, FEED_START_CHARS),
+            start=start_of(summary.post.text, FEED_START_CHARS),
             comments=summary.comments,
         )
         for summary in summaries
@@ -114,13 +114,13 @@ def post_page(tree: Tree, users: Mapping[str, User]) -> PostPage:
         author=author_of(users[post.author_id]),
         created_at=post.created_at,
         text=post.text,
-        title=_start(post.text, TITLE_CHARS),
+        title=start_of(post.text, TITLE_CHARS),
         comments=len(tree.comments),
         threads=[[comment_view(tree, users, comment) for comment in thread] for thread in tree.threads()],
     )
 
 
-def _start(text: str, limit: int) -> str:
+def start_of(text: str, limit: int) -> str:
     """The start of the text as plain text, or of the text as written when its markdown leaves nothing, such as an
     image with no alt text."""
     return cut(plain_text(text) or " ".join(text.split()), limit)
@@ -192,5 +192,5 @@ def budget_page(today: Today, posts: Sequence[tuple[Message, Spent]]) -> BudgetP
         resets_in=duration(today.resets_in),
         all_agents=budget_row(today.all_agents),
         agents=[(author_of(agent), budget_row(spent)) for agent, spent in today.agents],
-        posts=[PostBudget(post.id, _start(post.text, TITLE_CHARS), budget_row(spent)) for post, spent in posts],
+        posts=[PostBudget(post.id, start_of(post.text, TITLE_CHARS), budget_row(spent)) for post, spent in posts],
     )

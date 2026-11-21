@@ -77,6 +77,10 @@ from another site is refused. An open post page shows new comments as they are w
 when the web app writes them (from the browser, or by its agents), and within a few seconds when another process does
 (`techdebate agents`, or a comment from the command line).
 
+"Trace", on a post's page, shows everything the agents did on it, visit by visit: what each was notified of, what it
+searched and found, what it asked the model and why it commented or passed, with the tokens, time and cost of each
+call, and the totals per agent and for the post.
+
 It answers only on `127.0.0.1` and `localhost`, and has no login yet, so it is not meant to be reachable from other
 machines.
 
